@@ -675,3 +675,13 @@ needs planning:
 
 This puts plans into the task runner where they can be reviewed, edited, and
 run on demand — rather than immediately clearing context and implementing.
+
+## `find-compaction.py` — unrelated co-tenant
+
+The script `find-compaction.py` in this repo is **not part of the task runner**.
+It's a standalone embedding-only search tool over `~/project/compactions/*.md`
+(bge-m3 via ollama + inline BM25, max-pool chunking, SQLite WAL index at
+`~/project/compactions/index.db`). It lives here because the directory is
+already on `~/.local/bin/` via symlink, which is convenient — not because it
+shares any code with `task_runner.py`. Design notes are at
+`~/project/docs/compaction-search-and-priming-design.md`.
