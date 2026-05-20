@@ -43,6 +43,37 @@ SESSION_UUID_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Parses the 'session-...' filenames used in compactions/ and lightrag-history/:
+#   session-<UUID>              plain — UUID is the session that wrote the file
+#   session-<UUID>-<AID>        composite — parent session UUID + subagent
+#                               agent_id, written by /end from a subagent so
+#                               each task gets its own per-subagent file
+#   session-agent-<AID>         agent-only — no parent UUID recorded
+_UUID_RE_STR = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+SESSION_FN_RE = re.compile(
+    rf'^session-(?:'
+    rf'agent-(?P<agent_only>[0-9a-f]+)'
+    rf'|(?P<uuid>{_UUID_RE_STR})(?:-(?P<agent>[0-9a-f]+))?'
+    rf')$',
+    re.IGNORECASE,
+)
+
+
+def parse_session_stem(stem: str) -> tuple[str | None, str | None]:
+    """Return (parent_uuid, agent_id) from a 'session-...' filename stem.
+
+    Plain 'session-<UUID>'         → (uuid, None)
+    Composite 'session-<UUID>-<A>' → (uuid, aid)
+    Agent-only 'session-agent-<A>' → (None, aid)
+    Anything else                  → (None, None)
+    """
+    m = SESSION_FN_RE.match(stem)
+    if not m:
+        return (None, None)
+    if m.group('agent_only'):
+        return (None, m.group('agent_only'))
+    return (m.group('uuid'), m.group('agent'))
+
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
@@ -122,27 +153,19 @@ def build_canonical_to_filenames(filenames: set[str]) -> dict[str, set[str]]:
     return out
 
 
-def compaction_canonical(path: Path) -> str:
-    """Resolve a compaction file's canonical session UUID.
+def compaction_body_session(path: Path) -> str:
+    """Parse `**Session**: <UUID>` from the body of an older compaction.
 
-    Two filename conventions live in compactions/:
-      session-<UUID>.md       (modern /end skill) — UUID dereferenced
-                              via the matching JSONL's first-event sessionId
-      DDMonYYYY-HHMM.md       (older /compaction skill) — body's
-                              `**Session**: <UUID>` line is the canonical id
-
-    Falls back to the basename if no canonical UUID can be derived
-    (some older compactions have no Session line).
+    For DDMonYYYY-HHMM.md files (no UUID in the filename), the body
+    holds the canonical session id. Falls back to the basename if no
+    Session line is present.
     """
-    base = path.stem
-    if base.startswith("session-"):
-        return canonical_session_id(base.removeprefix("session-"))
     try:
         head = path.read_text(errors="replace")[:4000]
     except Exception:
-        return base
+        return path.stem
     m = SESSION_UUID_RE.search(head)
-    return m.group(1) if m else base
+    return m.group(1) if m else path.stem
 
 
 # Two tool-call rendering formats appear in task_runner.py --show -v:
@@ -188,62 +211,97 @@ def probe_task_writes(task_id: int, candidate_basenames: set[str],
     return found
 
 
-def build_artifact_sets(dirs: list[Path], pattern: str) -> tuple[set[str], set[str]]:
-    """Return (filename_uuids, canonical_session_ids) for artifact files.
+def build_artifact_sets(dirs: list[Path], pattern: str) -> tuple[set[str], set[str], set[str]]:
+    """Return (filename_uuids, canonical_session_ids, agent_ids) for artifacts.
 
-    filename_uuids are the literal UUIDs from the filenames — used for
-    direct per-run attribution via runs.chat_session_id (a chat-resumed
-    session writes session-<chat_session_id>.<ext>).
+    filename_uuids: bare UUIDs from plain 'session-<UUID>' filenames —
+        used for direct per-run attribution via runs.chat_session_id
+        (a chat-resumed session writes session-<chat_session_id>.<ext>).
 
-    canonical_session_ids are the dereferenced sessionIds from each
-    file's matching JSONL — used for parent-shared coverage (a session
-    that orchestrated tasks may have a single compaction covering all
-    of them).
+    canonical_session_ids: parent session UUIDs. For plain filenames,
+        dereferenced via the matching JSONL's first-event sessionId.
+        For composite 'session-<PARENT>-<AID>' filenames, the parent
+        UUID is taken directly from the filename. Used for parent-
+        shared coverage matching.
+
+    agent_ids: subagent agent_ids extracted from composite and agent-
+        only filenames — used for per-subagent direct attribution
+        against runs.agent_id (a /end invocation from inside a subagent
+        writes a file whose name encodes that subagent's agent_id).
     """
     filenames: set[str] = set()
     canonical: set[str] = set()
+    agent_ids: set[str] = set()
     for d in dirs:
         if not d.is_dir():
             continue
         for f in d.glob(pattern):
-            file_uuid = f.stem.removeprefix("session-")
-            filenames.add(file_uuid)
-            canonical.add(canonical_session_id(file_uuid))
-    return filenames, canonical
+            parent, aid = parse_session_stem(f.stem)
+            if aid:
+                agent_ids.add(aid)
+            if parent and aid:
+                # composite — parent UUID is authoritative as-is
+                canonical.add(parent)
+            elif parent:
+                # plain session-<UUID> — UUID is filename id; canonical
+                # comes from JSONL deref (handles --chat-resume forks)
+                filenames.add(parent)
+                canonical.add(canonical_session_id(parent))
+            # else: didn't match (smoke-test.json, etc.) — skip silently
+    return filenames, canonical, agent_ids
 
 
-def build_compaction_sets() -> tuple[set[str], set[str], dict[str, set[str]]]:
-    """Returns (filename_uuids, canonical_ids, canonical_to_basenames).
+def build_compaction_sets() -> tuple[set[str], set[str], set[str], dict[str, set[str]]]:
+    """Returns (filename_uuids, canonical_ids, agent_ids, canonical_to_basenames).
 
-    filename_uuids: bare UUIDs from session-<UUID>.md filenames (no
-        'session-' prefix). Used for chat_session_id direct-attribution
-        matching. Older DDMonYYYY-HHMM.md files contribute nothing here
-        — there's no UUID in their filename to pin a chat_session_id to.
+    filename_uuids: bare UUIDs from plain session-<UUID>.md filenames.
+        Used for chat_session_id direct-attribution matching. Composite
+        and older DDMonYYYY-HHMM.md files contribute nothing here.
 
-    canonical_ids: per-file canonical session UUID, regardless of
-        filename convention. Modern files dereference via JSONL first
-        event; older files parse `**Session**: <UUID>` from the body.
-        Used for parent-shared coverage matching.
+    canonical_ids: per-file parent session UUID. For plain filenames,
+        dereferenced via the matching JSONL's first event. For composite
+        session-<PARENT>-<AID>.md filenames, taken directly from the
+        filename. For older DDMonYYYY-HHMM.md files, parsed from the
+        body's `**Session**: <UUID>` line. Used for parent-shared
+        coverage matching.
 
-    canonical_to_basenames: reverse map {canonical_id -> {full basenames}}.
+    agent_ids: subagent agent_ids from composite and agent-only
+        filenames. Used for per-subagent direct attribution against
+        runs.agent_id — a /end invocation from inside a subagent writes
+        a file whose name encodes that subagent's agent_id, making the
+        match definitively per-task.
+
+    canonical_to_basenames: reverse map {parent_id -> {full basenames}}.
         Used by the probe — greps the verbose run output for these
         strings, which match Write tool-use lines verbatim.
     """
     if not COMPACTIONS_DIR.is_dir():
-        return set(), set(), {}
+        return set(), set(), set(), {}
     filename_uuids: set[str] = set()
     canonical: set[str] = set()
+    agent_ids: set[str] = set()
     rev: dict[str, set[str]] = defaultdict(set)
     for f in COMPACTIONS_DIR.glob("*.md"):
-        cid = compaction_canonical(f)
-        canonical.add(cid)
-        rev[cid].add(f.stem)
-        if f.stem.startswith("session-"):
-            filename_uuids.add(f.stem.removeprefix("session-"))
-    return filename_uuids, canonical, rev
+        parent, aid = parse_session_stem(f.stem)
+        if aid:
+            agent_ids.add(aid)
+        if parent and aid:
+            canonical.add(parent)
+            rev[parent].add(f.stem)
+        elif parent:
+            filename_uuids.add(parent)
+            cid = canonical_session_id(parent)
+            canonical.add(cid)
+            rev[cid].add(f.stem)
+        else:
+            # Legacy DDMonYYYY-HHMM.md — canonical UUID lives in the body
+            cid = compaction_body_session(f)
+            canonical.add(cid)
+            rev[cid].add(f.stem)
+    return filename_uuids, canonical, agent_ids, rev
 
 
-def build_kg_sets() -> tuple[set[str], set[str]]:
+def build_kg_sets() -> tuple[set[str], set[str], set[str]]:
     return build_artifact_sets(LIGHTRAG_DIRS, "session-*.json")
 
 
@@ -268,14 +326,18 @@ def load_task_runs(conn) -> dict[int, list[dict]]:
 def coverage_for_task(
     runs: list[dict],
     agent_to_parent: dict[str, str],
-    comp_filenames: set[str], comp_canonical: set[str],
-    kg_filenames: set[str],   kg_canonical: set[str],
+    comp_filenames: set[str], comp_canonical: set[str], comp_agent_ids: set[str],
+    kg_filenames: set[str],   kg_canonical: set[str],   kg_agent_ids: set[str],
 ) -> dict:
     """Compute coverage for one task's runs.
 
     Two coverage tiers per artifact:
-      direct  — a run's chat_session_id matches an artifact filename
-                (definitively this run wrote it via end2/--chat-resume)
+      direct  — definitively this task's run wrote the artifact. Two
+                signals qualify: a run's chat_session_id matches an
+                artifact filename (--chat-resume fork), or a run's
+                agent_id matches an agent_id encoded in a composite
+                or agent-only artifact filename (/end from inside a
+                subagent).
       shared  — a parent session has the artifact (could have been
                 written by the orchestrator or any sibling subagent;
                 no per-task attribution)
@@ -293,12 +355,17 @@ def coverage_for_task(
         if csid and csid in kg_filenames:
             direct_kg = True
 
+        aid = r.get("agent_id")
+        if aid and aid in comp_agent_ids:
+            direct_comp = True
+        if aid and aid in kg_agent_ids:
+            direct_kg = True
+
         sid = r.get("session_id")
         if sid:
             if sid not in parents:
                 parents.append(sid)
             continue
-        aid = r.get("agent_id")
         if aid and aid in agent_to_parent:
             p = agent_to_parent[aid]
             if p not in parents:
@@ -350,8 +417,8 @@ def main():
     conn.row_factory = sqlite3.Row
 
     agent_to_parent = build_agent_to_parent_map()
-    comp_filenames, comp_canonical, comp_canon_to_files = build_compaction_sets()
-    kg_filenames, kg_canonical = build_kg_sets()
+    comp_filenames, comp_canonical, comp_agent_ids, comp_canon_to_files = build_compaction_sets()
+    kg_filenames, kg_canonical, kg_agent_ids = build_kg_sets()
     kg_canon_to_files = build_canonical_to_filenames(kg_filenames)
     runs_by_task = load_task_runs(conn)
 
@@ -362,8 +429,8 @@ def main():
             continue
         runs = runs_by_task.get(t["id"], [])
         cov = coverage_for_task(runs, agent_to_parent,
-                                comp_filenames, comp_canonical,
-                                kg_filenames,   kg_canonical)
+                                comp_filenames, comp_canonical, comp_agent_ids,
+                                kg_filenames,   kg_canonical,   kg_agent_ids)
 
         # Probe shared verdicts: if the task's verbose --show output
         # mentions any of its parent's artifact filenames, upgrade to ok.
@@ -417,7 +484,8 @@ def main():
           f"shared={by_state[('kg','shared')]:4d}  "
           f"missing={by_state[('kg','missing')]:4d}  "
           f"unmappable={by_state[('kg','unmappable')]:4d}")
-    print("  ok     = direct attribution (chat_session_id match, or --show -v "
+    print("  ok     = direct attribution (chat_session_id match, "
+          "agent_id encoded in composite filename, or --show -v "
           "tool-trace shows the task wrote the file)")
     print("  shared = parent session has the artifact, but no per-task attribution")
     print(f"  parent sessions known: "
