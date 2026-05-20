@@ -143,6 +143,28 @@ def strip_session_start_attachment(event, *, head=200):
     return saved
 
 
+def strip_local_command_content(event):
+    """Blank the `content` of system/local_command events.
+
+    These hold slash-command rendered output (often an ANSI-coded
+    panel like the /context render) -- bulky, local-only bookkeeping
+    that the conversation doesn't need. Event structure (parentUuid,
+    uuid) is preserved so the chain stays intact.
+
+    Returns bytes saved.
+    """
+    if event.get("type") != "system":
+        return 0
+    if event.get("subtype") != "local_command":
+        return 0
+    content = event.get("content")
+    if not isinstance(content, str) or len(content) < 256:
+        return 0
+    saved = len(content)
+    event["content"] = "[local_command content stripped]"
+    return saved
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -153,17 +175,21 @@ def main():
                     help="Replace base64 image data in tool_results with a stub")
     ap.add_argument("--strip-session-start", action="store_true",
                     help="Truncate SessionStart hook attachment stdouts")
+    ap.add_argument("--strip-local-command", action="store_true",
+                    help="Blank content of system/local_command events "
+                         "(slash-command rendered output)")
     ap.add_argument("--truncate-tool-results", nargs="?", type=int, const=4096,
                     default=None, metavar="N",
                     help="Truncate tool_result text bodies over N bytes (default 4096)")
     ap.add_argument("--aggressive", action="store_true",
                     help="Enable --strip-images, --strip-session-start, "
-                         "and --truncate-tool-results at defaults")
+                         "--strip-local-command, and --truncate-tool-results at defaults")
     args = ap.parse_args()
 
     if args.aggressive:
         args.strip_images = True
         args.strip_session_start = True
+        args.strip_local_command = True
         if args.truncate_tool_results is None:
             args.truncate_tool_results = 4096
 
@@ -183,6 +209,7 @@ def main():
     saved_img = 0
     saved_trunc = 0
     saved_ss = 0
+    saved_lc = 0
     n_events = 0
 
     os.makedirs(HOME_BUCKET, exist_ok=True)
@@ -208,6 +235,8 @@ def main():
                 saved_trunc += t
             if args.strip_session_start:
                 saved_ss += strip_session_start_attachment(event)
+            if args.strip_local_command:
+                saved_lc += strip_local_command_content(event)
             fout.write(json.dumps(event) + "\n")
             n_events += 1
 
@@ -218,6 +247,7 @@ def main():
     print(f"  signatures:    {saved_sig:>12,} bytes", file=sys.stderr)
     print(f"  images:        {saved_img:>12,} bytes", file=sys.stderr)
     print(f"  session-start: {saved_ss:>12,} bytes", file=sys.stderr)
+    print(f"  local_command: {saved_lc:>12,} bytes", file=sys.stderr)
     print(f"  tool_results:  {saved_trunc:>12,} bytes (threshold "
           f"{args.truncate_tool_results})", file=sys.stderr)
     print(f"New session UUID: {new_id}", file=sys.stderr)
