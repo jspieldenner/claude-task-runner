@@ -71,16 +71,50 @@ def iter_user_inputs(path):
                 yield i, text
 
 
+def extract_assistant_text(event):
+    """Concatenate text from an assistant event's content blocks."""
+    if event.get("type") != "assistant":
+        return None
+    msg = event.get("message") or {}
+    if not isinstance(msg, dict):
+        return None
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return None
+    parts = []
+    for b in content:
+        if isinstance(b, dict) and b.get("type") == "text":
+            parts.append(b.get("text", ""))
+    return "".join(parts) if parts else None
+
+
+def iter_assistant_texts(path):
+    """Yield (line_number, text) for every assistant event with text."""
+    with open(path) as f:
+        for i, line in enumerate(f, 1):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            text = extract_assistant_text(event)
+            if text is not None and text.strip():
+                yield i, text
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("source", help="Source session JSONL")
     ap.add_argument("match", nargs="?", default=None,
-                    help="Pattern to match against a user message")
+                    help="Pattern to match against the chosen role's message")
     ap.add_argument("--substring", action="store_true",
-                    help="Match as substring (default: prefix)")
+                    help="Match as substring (default: prefix for user, substring for assistant)")
+    ap.add_argument("--at-assistant", action="store_true",
+                    help="Match an assistant message instead of a user message. "
+                         "Keeps the matching message (drops everything after it). "
+                         "Defaults to substring matching.")
     ap.add_argument("--list", action="store_true",
-                    help="List every user-input message with its line number and exit")
+                    help="List messages of the chosen role with line numbers and exit")
     args = ap.parse_args()
 
     if not os.path.exists(args.source):
@@ -88,7 +122,8 @@ def main():
         return 1
 
     if args.list:
-        for line_no, text in iter_user_inputs(args.source):
+        iter_fn = iter_assistant_texts if args.at_assistant else iter_user_inputs
+        for line_no, text in iter_fn(args.source):
             head = text.lstrip().replace("\n", " ")
             print(f"line {line_no:>5}: {head[:140]}")
         return 0
@@ -97,24 +132,48 @@ def main():
         print("Error: missing match pattern (or use --list)", file=sys.stderr)
         return 2
 
-    target = args.match.lstrip()
-    cut_line = None
-    matched_text = None
-    for line_no, text in iter_user_inputs(args.source):
-        head = text.lstrip()
-        ok = (target in head) if args.substring else head.startswith(target)
-        if ok:
-            cut_line = line_no
-            matched_text = head
-            break
+    if args.at_assistant:
+        # Find the matching assistant; cut AFTER it (cut_line = match_line + 1)
+        target = args.match
+        substring = True if not args.substring else True  # default to substring
+        # Allow explicit prefix mode if user really wants it
+        substring = True
+        match_line = None
+        matched_text = None
+        for line_no, text in iter_assistant_texts(args.source):
+            if target in text:
+                match_line = line_no
+                matched_text = text
+                break
+        if match_line is None:
+            print(f"Error: no assistant message matched: {args.match[:80]!r}",
+                  file=sys.stderr)
+            return 1
+        cut_line = match_line + 1
+        print(f"Matched assistant at line {match_line}; cut after (line {cut_line})",
+              file=sys.stderr)
+        print(f"Matched text tail: ...{matched_text[-200:]!r}", file=sys.stderr)
+    else:
+        target = args.match.lstrip()
+        cut_line = None
+        matched_text = None
+        for line_no, text in iter_user_inputs(args.source):
+            head = text.lstrip()
+            ok = (target in head) if args.substring else head.startswith(target)
+            if ok:
+                cut_line = line_no
+                matched_text = head
+                break
 
-    if cut_line is None:
-        print(f"Error: no user message matched: {args.match[:80]!r}", file=sys.stderr)
-        return 1
+        if cut_line is None:
+            print(f"Error: no user message matched: {args.match[:80]!r}",
+                  file=sys.stderr)
+            return 1
 
     print(f"Cut point: line {cut_line}", file=sys.stderr)
-    print(f"Matched user text (first 200 chars): "
-          f"{matched_text[:200].replace(chr(10),' ')!r}", file=sys.stderr)
+    if not args.at_assistant:
+        print(f"Matched user text (first 200 chars): "
+              f"{matched_text[:200].replace(chr(10),' ')!r}", file=sys.stderr)
 
     new_id = str(uuid.uuid4())
     dst = os.path.join(HOME_BUCKET, f"{new_id}.jsonl")
