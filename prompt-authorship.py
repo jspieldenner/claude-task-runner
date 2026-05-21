@@ -16,10 +16,95 @@ import argparse
 import glob
 import json
 import os
+import subprocess
+import sys
 from collections import defaultdict
 
 SESSIONS_DIR = os.path.expanduser("~/project/sessions")
 MARKER = "/project/prompts/"
+BACKFILL_SOURCE_ID = "backfill:prompt-authorship"
+
+
+def build_taskmap():
+    """Return {prompt_slug: task_id} parsed from `task_runner.py --list`.
+
+    The list is `ID  Status  Agent  Name  Dependencies`; status/agent are
+    single tokens and task names are single (kebab-case) tokens, so on any
+    data row tokens[0] is the id and tokens[3] is the name.
+    """
+    out = subprocess.run(["task_runner.py", "--list"],
+                         capture_output=True, text=True).stdout
+    m = {}
+    for line in out.splitlines():
+        toks = line.split()
+        if len(toks) >= 4 and toks[0].isdigit():
+            m[toks[3]] = toks[0]  # name -> id (DB-correct)
+    return m
+
+
+def emit_kg(events):
+    """Print a drain-ingestible KG JSON object of authorship relationships.
+
+    One edge per prompt: the authoring session (first Write) -> the task
+    entity, named `task <id> <slug>` with the DB-correct id (strategy 2).
+    No entities (session + task nodes already exist); one synthetic
+    backfill chunk carries the shared source_id the drain requires.
+    Prompts with no DB task id are reported to stderr, not emitted.
+    """
+    taskmap = build_taskmap()
+    by_prompt = defaultdict(list)
+    for e in events:
+        by_prompt[e["prompt"]].append(e)
+
+    rels, missing = [], []
+    for prompt in sorted(by_prompt):
+        evs = by_prompt[prompt]
+        writes = [e for e in evs if e["tool"] == "Write"]
+        author = writes[0] if writes else evs[0]
+        tid = taskmap.get(prompt)
+        if tid is None:
+            missing.append(prompt)
+            continue
+        sess = author["session"]
+        rels.append({
+            "src_id": f"session-{sess}",
+            "tgt_id": f"task {tid} {prompt}",
+            "description": (
+                f"Session {sess} authored the prompt for task {tid} "
+                f"({prompt}); the design rationale, rejected alternatives, "
+                f"and constraints behind the task live in this session's "
+                f"compaction."),
+            "keywords": "authorship, prompt-authoring, provenance",
+            "weight": 2.0,
+            "source_id": BACKFILL_SOURCE_ID,
+        })
+
+    payload = {
+        "source": {"type": "backfill", "name": "prompt-authorship"},
+        "chunk": {
+            "content": (
+                "Prompt-authorship provenance edges backfilled from "
+                "~/project/sessions/*.jsonl by prompt-authorship.py --kg. "
+                "Each relationship links the session that issued the first "
+                "Write of a task prompt (the authoring session) to that "
+                "task's entity (task <id> <slug>, DB-correct id from "
+                "task_runner.py --list), so task-provenance lookups via "
+                "entity-desc.py -r can trace back to the authoring session's "
+                "compaction."),
+            "source_id": BACKFILL_SOURCE_ID,
+            "file_path": "prompt-authorship-backfill",
+            "chunk_order_index": 0,
+        },
+        "entities": [],
+        "relationships": rels,
+    }
+    print(json.dumps(payload, indent=2))
+    if missing:
+        sys.stderr.write(
+            f"\n# {len(missing)} prompt(s) with no DB task id "
+            f"(no edge emitted):\n")
+        for p in missing:
+            sys.stderr.write(f"#   {p}\n")
 
 
 def scan_file(path):
@@ -61,6 +146,10 @@ def main():
                     help="group by prompt and show its author (first Write) + revisers")
     ap.add_argument("--filter", metavar="SUBSTR", default="",
                     help="only show prompts whose name contains SUBSTR")
+    ap.add_argument("--kg", action="store_true",
+                    help="emit a drain-ingestible KG JSON object of authorship "
+                         "edges (authoring session -> task <id> <slug>, "
+                         "DB-correct id); no entities, one backfill chunk")
     args = ap.parse_args()
 
     events = []
@@ -69,6 +158,10 @@ def main():
     if args.filter:
         events = [e for e in events if args.filter in e["prompt"]]
     events.sort(key=lambda e: e["timestamp"])
+
+    if args.kg:
+        emit_kg(events)
+        return
 
     if not args.by_prompt:
         # Flat chronological list of every prompt-write tool call.
