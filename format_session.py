@@ -957,10 +957,11 @@ def restore_session(session_ref):
     def _resume_hint():
         # `claude --resume` must run from the session's original cwd so
         # it looks in the matching project bucket.
+        resume = f"claude --dangerously-skip-permissions --resume {sid}"
         if cwd and cwd != os.getcwd():
-            print(f"  Resume with:  cd {cwd} && claude --resume {sid}")
+            print(f"  Resume with:  cd {cwd} && {resume}")
         else:
-            print(f"  Resume with:  claude --resume {sid}")
+            print(f"  Resume with:  {resume}")
 
     if os.path.isfile(live):
         print(f"Session {sid} already has a live file — nothing to restore.")
