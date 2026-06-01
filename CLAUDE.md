@@ -491,7 +491,27 @@ format_session.py gnumach --all         # Show everything
 
 # Set a display name for a session (requires tasks.db)
 format_session.py --name SESSION_REF "my name"
+
+# Restore a vacuumed session so `claude --resume` can find it again
+format_session.py --restore SESSION_REF
 ```
+
+### Restoring vacuumed sessions (`--restore`)
+
+Claude Code periodically vacuums old session JSONLs out of the live
+bucket (`~/.claude/projects/<bucket>/<id>.jsonl`). A vacuumed session
+still appears in `--list` (not marked `[deleted]`) as long as its
+hardlink backup under `~/project/sessions/` survived — but
+`claude --resume <id>` reads the *live* bucket file, which is gone, so
+the session can't be resumed even though its data is safe.
+
+`--restore SESSION_REF` re-materializes the backup into the live bucket
+(hardlink if same filesystem, copy otherwise) and prints the
+`claude --resume` command. It's idempotent (a session that already has a
+live file is left untouched) and refuses sessions whose backup is also
+gone (truly `[deleted]`). Run `claude --resume` from the session's
+original cwd — the printed command includes a `cd` when it differs from
+the current directory.
 
 Claude Code shards session JSONLs by cwd under `~/.claude/projects/`,
 giving each cwd its own `-<encoded-cwd>` subdirectory (e.g.

@@ -19,6 +19,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import sqlite3
 import sys
 import textwrap
@@ -907,6 +908,104 @@ def set_display_name(session_ref, name):
         print(f"Cleared display name for {sid[:8]}...")
 
 
+def restore_session(session_ref):
+    """Restore a vacuumed session's live JSONL so `claude --resume` can find it.
+
+    Claude Code reads a resumable session from its live bucket at
+    `<PROJECTS_ROOT>/<bucket>/<session_id>.jsonl`. When that file is
+    vacuumed, the session survives only as the hardlink backup written
+    by export_sessions.py under BACKUP_SESSIONS_DIR — which keeps it
+    visible in `--list` but is invisible to `claude --resume`. This
+    re-links (or copies) the backup back into the live bucket so the
+    session can be resumed, and prints the resume command.
+    """
+    if not os.path.isdir(PROJECTS_ROOT):
+        print(f"Projects root not found: {PROJECTS_ROOT}", file=sys.stderr)
+        sys.exit(1)
+
+    db = get_db()
+    scan_sessions(db)
+
+    # Resolve by display_name / custom_title / ID prefix. Note: unlike
+    # resolve_session we do NOT filter on deleted, so a truly-deleted
+    # session (no surviving backup) resolves and gets a clear "no backup"
+    # message rather than "no session matching".
+    rows = db.execute("""
+        SELECT session_id, display_name, custom_title, backup_path, project_dir, cwd
+        FROM sessions
+        WHERE display_name = ? COLLATE NOCASE
+            OR custom_title = ? COLLATE NOCASE
+            OR session_id LIKE ? || '%'
+    """, (session_ref, session_ref, session_ref)).fetchall()
+
+    if len(rows) == 0:
+        print(f"No session matching '{session_ref}'", file=sys.stderr)
+        db.close()
+        sys.exit(1)
+    elif len(rows) > 1:
+        print(f"Ambiguous session '{session_ref}', matches:", file=sys.stderr)
+        for sid, dn, ct, _, _, _ in rows:
+            label = dn or ct or sid
+            print(f"  {sid}  {label}", file=sys.stderr)
+        db.close()
+        sys.exit(1)
+
+    sid, display_name, custom_title, backup_path, project_dir, cwd = rows[0]
+    bucket = project_dir or DEFAULT_BUCKET
+    live = os.path.join(PROJECTS_ROOT, bucket, sid + ".jsonl")
+
+    def _resume_hint():
+        # `claude --resume` must run from the session's original cwd so
+        # it looks in the matching project bucket.
+        if cwd and cwd != os.getcwd():
+            print(f"  Resume with:  cd {cwd} && claude --resume {sid}")
+        else:
+            print(f"  Resume with:  claude --resume {sid}")
+
+    if os.path.isfile(live):
+        print(f"Session {sid} already has a live file — nothing to restore.")
+        _resume_hint()
+        db.close()
+        return
+
+    # Fall back to find_backup_path if the cached backup_path is stale/empty.
+    if not backup_path or not os.path.isfile(backup_path):
+        backup_path = find_backup_path(display_name) or find_backup_path(custom_title)
+    if not backup_path or not os.path.isfile(backup_path):
+        print(
+            f"Session {sid} has no surviving backup under {BACKUP_SESSIONS_DIR} "
+            "— cannot restore.",
+            file=sys.stderr,
+        )
+        db.close()
+        sys.exit(1)
+
+    os.makedirs(os.path.dirname(live), exist_ok=True)
+    # Prefer a hardlink (free, and consistent with the export_sessions.py
+    # model where backup and live share one inode). Fall back to a copy if
+    # the backup is on a different filesystem.
+    how = "hardlinked"
+    try:
+        os.link(backup_path, live)
+    except OSError:
+        shutil.copy2(backup_path, live)
+        how = "copied"
+
+    # Reflect the now-live file in the cache immediately.
+    db.execute(
+        "UPDATE sessions SET deleted = 0, project_dir = ? WHERE session_id = ?",
+        (bucket, sid),
+    )
+    db.commit()
+    db.close()
+
+    label = display_name or custom_title or sid
+    print(f"Restored '{label}' ({how}):")
+    print(f"  {backup_path}")
+    print(f"  → {live}")
+    _resume_hint()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Format a Claude Code session jsonl file for readable output"
@@ -928,6 +1027,11 @@ def main():
     parser.add_argument(
         "--name", nargs=2, metavar=("SESSION", "NAME"),
         help="Set a display name for a session (use empty string to clear)"
+    )
+    parser.add_argument(
+        "--restore", metavar="SESSION",
+        help="Restore a vacuumed session's live JSONL from its backup so "
+             "`claude --resume` can find it (accepts a name, title, or ID prefix)"
     )
     parser.add_argument(
         "-w", "--width", type=int, default=0, help="Output width (default: terminal width)"
@@ -982,6 +1086,10 @@ def main():
 
     if args.name:
         set_display_name(args.name[0], args.name[1])
+        return
+
+    if args.restore:
+        restore_session(args.restore)
         return
 
     if args.list:
