@@ -1871,6 +1871,38 @@ def send_session_message(db, session_id, message):
     return True
 
 
+def send_agent_message(db, agent_id, message):
+    """Queue a message for a specific subagent by its agent_id.
+
+    For Agent-tool subagents launched directly (not via the task runner) —
+    they have no task name and are keyed only by the `agentId` the Agent tool
+    returned (same format as `runs.agent_id`, e.g. `a0a63f97d5c6c64e9`).
+    Delivered by drain_inbox when that subagent's PreToolUse hook fires with a
+    matching agent_id. Works for task-runner agents too, but `--send NAME` is
+    usually more convenient for those.
+    """
+    db.execute(
+        "INSERT INTO inbox (task_id, agent_id, session_id, message) "
+        "VALUES (NULL, ?, NULL, ?)",
+        (agent_id, message),
+    )
+    db.commit()
+    # If this agent_id matches a known run, note the task / liveness for context.
+    run = db.execute(
+        "SELECT t.name AS name, r.finished_at AS finished_at FROM runs r "
+        "LEFT JOIN tasks t ON t.id = r.task_id "
+        "WHERE r.agent_id = ? ORDER BY r.id DESC LIMIT 1",
+        (agent_id,),
+    ).fetchone()
+    if run and run["name"]:
+        live = (" (still running)" if run["finished_at"] is None
+                else " (its last run has finished — message may never be picked up)")
+        print(f"Queued message for agent {agent_id} [task '{run['name']}']{live}")
+    else:
+        print(f"Queued message for agent {agent_id} (delivered on its next tool call)")
+    return True
+
+
 def show_inbox(db, name=None):
     """Show inbox messages with delivery status.
 
@@ -2537,6 +2569,11 @@ def main():
                         help="Queue a message delivered to a specific Claude Code session. "
                              "SESSION may be a UUID, UUID prefix, display_name, or custom_title. "
                              "Usage: --send-session SESSION MESSAGE, or --send-session SESSION (stdin)")
+    parser.add_argument("--send-agent", metavar="AGENT_MSG", nargs="+",
+                        dest="send_agent",
+                        help="Queue a message delivered to a subagent by its agent_id "
+                             "(for Agent-tool subagents launched directly, with no task name). "
+                             "Usage: --send-agent AGENT_ID MESSAGE, or --send-agent AGENT_ID (stdin)")
     parser.add_argument("--drain-inbox", action="store_true",
                         help="Hook entry point: read hook JSON on stdin, emit queued messages to stdout")
     parser.add_argument("--inbox", metavar="NAME", nargs="?", const="",
@@ -2828,6 +2865,17 @@ def main():
         if session_id is None:
             sys.exit(1)
         if not send_session_message(db, session_id, message):
+            sys.exit(1)
+    elif args.send_agent:
+        if len(args.send_agent) == 1:
+            message = sys.stdin.read()
+        elif len(args.send_agent) == 2:
+            message = args.send_agent[1]
+        else:
+            print("--send-agent takes 1 or 2 arguments: AGENT_ID [MESSAGE]", file=sys.stderr)
+            sys.exit(1)
+        agent_id = args.send_agent[0]
+        if not send_agent_message(db, agent_id, message):
             sys.exit(1)
     elif args.drain_inbox:
         drain_inbox(db)

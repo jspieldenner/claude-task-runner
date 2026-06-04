@@ -81,6 +81,7 @@ task_runner.py --unhold NAME            # Resume a held task
 task_runner.py --kill NAME              # Mark a running task as interrupted
 task_runner.py --sync NAME              # Update task status from session results
 task_runner.py --send NAME "message"    # Queue a message delivered to the task's agent on its next turn
+task_runner.py --send-agent AGENT_ID "message"  # Same, but target a task-less Agent-tool subagent by its agent_id
 task_runner.py --backup                 # Export sessions, commit, push to backup remote
 
 # Creating (write prompt to prompts/NAME first)
@@ -603,6 +604,24 @@ task_runner.py --send my-task "also benchmark with -O3"
 Messages can be queued before the agent launches — they stay keyed to
 `task_id` with `agent_id` NULL until `--set-agent-id` backfills them onto
 the newly-started agent.
+
+### Messaging a subagent with no task (`--send-agent`)
+
+`--send NAME` only works for task-runner tasks. For an **Agent-tool subagent
+launched directly** (no task name — keyed only by the `agentId` the Agent tool
+returned, e.g. `a0a63f97d5c6c64e9`), use `--send-agent`:
+
+```bash
+task_runner.py --send-agent a0a63f97d5c6c64e9 "switch to the -O3 build"
+echo "longer message" | task_runner.py --send-agent a0a63f97d5c6c64e9   # message from stdin
+```
+
+This inserts an `inbox` row keyed straight to that `agent_id` (task_id and
+session_id NULL); `--drain-inbox` delivers it on the subagent's next tool call,
+same as `--send`. If the `agent_id` matches a known run, the confirmation notes
+the task name and whether that run is still live. (`--send-session UUID` is the
+analogous command for targeting a whole interactive session by its UUID,
+prefix, display name, or custom title.)
 
 ### Installing the hooks
 
