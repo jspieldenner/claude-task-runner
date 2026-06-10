@@ -741,8 +741,12 @@ def scan_sessions(db):
     db.commit()
 
 
-def list_sessions(show_deleted=False, show_cwd=False, show_name=False):
-    """List interactive (non-task) sessions from the cache."""
+def _listed_session_rows(show_deleted=False):
+    """Return the rows behind --list, newest first.
+
+    Shared by list_sessions and show_all_sessions so both walk the same
+    table in the same order.
+    """
     if not os.path.isdir(PROJECTS_ROOT):
         print(f"Projects root not found: {PROJECTS_ROOT}", file=sys.stderr)
         sys.exit(1)
@@ -753,7 +757,7 @@ def list_sessions(show_deleted=False, show_cwd=False, show_name=False):
     query = """
         SELECT session_id, first_ts, file_size, user_msg_count,
                display_name, custom_title, first_user_msg, deleted,
-               project_dir, cwd
+               project_dir, cwd, backup_path
         FROM sessions
         WHERE is_task = 0 AND is_chat = 0 AND has_messages = 1
     """
@@ -763,6 +767,24 @@ def list_sessions(show_deleted=False, show_cwd=False, show_name=False):
 
     rows = db.execute(query).fetchall()
     db.close()
+    return rows
+
+
+def _format_list_date(first_ts):
+    """Render a session's first_ts the way --list does."""
+    ts = first_ts or ""
+    if ts:
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            ts = dt.strftime("%d %b %Y %H:%M")
+        except ValueError:
+            ts = ts[:16]
+    return ts
+
+
+def list_sessions(show_deleted=False, show_cwd=False, show_name=False):
+    """List interactive (non-task) sessions from the cache."""
+    rows = _listed_session_rows(show_deleted)
 
     if not rows:
         print("No interactive sessions found.")
@@ -787,14 +809,8 @@ def list_sessions(show_deleted=False, show_cwd=False, show_name=False):
     print(header)
     print(sep)
     for (sid, first_ts, file_size, user_msg_count, display_name, custom_title,
-         first_user_msg, deleted, project_dir, cwd) in rows:
-        ts = first_ts or ""
-        if ts:
-            try:
-                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                ts = dt.strftime("%d %b %Y %H:%M")
-            except ValueError:
-                ts = ts[:16]
+         first_user_msg, deleted, project_dir, cwd, backup_path) in rows:
+        ts = _format_list_date(first_ts)
 
         size_kb = (file_size or 0) // 1024
         if size_kb >= 1024:
@@ -824,6 +840,78 @@ def list_sessions(show_deleted=False, show_cwd=False, show_name=False):
             preview = f"[deleted] {preview}"
         line += f"  {preview}"
         print(line)
+
+
+def _session_file_path(sid, project_dir, backup_path, display_name, custom_title):
+    """Best available JSONL path for a session: live bucket, else backup."""
+    bucket = project_dir or DEFAULT_BUCKET
+    live = os.path.join(PROJECTS_ROOT, bucket, sid + ".jsonl")
+    if os.path.isfile(live):
+        return live
+    if backup_path and os.path.isfile(backup_path):
+        return backup_path
+    backup = find_backup_path(display_name) or find_backup_path(custom_title)
+    return backup
+
+
+def read_events(file_path):
+    """Read and parse a session jsonl file into a list of event dicts."""
+    events = []
+    with open(file_path) as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    continue
+                events.append(event)
+            except json.JSONDecodeError as e:
+                print(f"Warning: skipping malformed JSON on line {line_num}: {e}",
+                      file=sys.stderr)
+    return events
+
+
+def show_all_sessions(width, show_deleted=False, **render_opts):
+    """Render every --list session to stdout, newest first.
+
+    Walks the same rows in the same order as --list, printing a header
+    line (date, ID, name when set) before each session's transcript.
+    """
+    rows = _listed_session_rows(show_deleted)
+
+    if not rows:
+        print("No interactive sessions found.")
+        return
+
+    first = True
+    for (sid, first_ts, file_size, user_msg_count, display_name, custom_title,
+         first_user_msg, deleted, project_dir, cwd, backup_path) in rows:
+        if not first:
+            print()
+        first = False
+
+        ts = _format_list_date(first_ts)
+        header = f"═══ {ts}  {(sid or '')[:8]}"
+        name = display_name or custom_title
+        if name:
+            header += f"  {name}"
+        if deleted:
+            header += "  [deleted]"
+        header += " "
+        header += "═" * max(0, width - len(header))
+        print(header)
+        print()
+
+        path = _session_file_path(sid, project_dir, backup_path,
+                                  display_name, custom_title)
+        if not path:
+            print("  (session file missing — no live copy or backup)")
+            continue
+
+        for line in process_events(read_events(path), width, **render_opts):
+            print(line)
 
 
 def resolve_session(name):
@@ -1087,7 +1175,9 @@ def main():
     )
     parser.add_argument(
         "--all", action="store_true",
-        help="Show everything (tools, tool output, thinking, system, compaction)"
+        help="With a session: show everything (tools, tool output, thinking, "
+             "system, compaction). Without one: render every --list session "
+             "to stdout, newest first, one after another."
     )
     parser.add_argument(
         "-t", "--timestamps", action="store_true",
@@ -1100,7 +1190,10 @@ def main():
     if args.verbose >= 2:
         args.tool_output = True
 
-    if args.all:
+    # --all with a session means "show every kind of content"; --all
+    # without one means "show every session" (handled below) and leaves
+    # the per-session rendering flags as given.
+    if args.all and args.file:
         args.thinking = True
         args.system = True
         args.tools = True
@@ -1119,33 +1212,31 @@ def main():
         list_sessions(show_deleted=args.deleted, show_cwd=args.cwd, show_name=args.names)
         return
 
+    width = args.width or get_terminal_width()
+
+    # --tool-output implies --tools
+    show_tools = args.tools or args.tool_output
+
     if not args.file:
-        parser.error("session name or file is required (or use --list)")
+        if args.all:
+            show_all_sessions(
+                width, show_deleted=args.deleted,
+                show_thinking=args.thinking,
+                show_system=args.system,
+                show_tools=show_tools,
+                show_tool_output=args.tool_output,
+                show_compaction=args.compaction,
+                show_timestamps=args.timestamps,
+            )
+            return
+        parser.error("session name or file is required (or use --list / --all)")
 
     # Resolve session name/ID if not a file path
     file_path = args.file
     if not os.path.isfile(file_path):
         file_path = resolve_session(args.file)
 
-    width = args.width or get_terminal_width()
-
-    # Read and parse all events
-    events = []
-    with open(file_path) as f:
-        for line_num, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-                if not isinstance(event, dict):
-                    continue
-                events.append(event)
-            except json.JSONDecodeError as e:
-                print(f"Warning: skipping malformed JSON on line {line_num}: {e}", file=sys.stderr)
-
-    # --tool-output implies --tools
-    show_tools = args.tools or args.tool_output
+    events = read_events(file_path)
 
     # Process and output
     for line in process_events(

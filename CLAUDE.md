@@ -491,6 +491,11 @@ format_session.py gnumach --tool-output # Show tool results (implies --tools)
 format_session.py gnumach --thinking    # Show thinking blocks
 format_session.py gnumach --all         # Show everything
 
+# Render every --list session to stdout, newest first, one after another.
+# (--all without a session argument; combine with -t/-v/--thinking etc.
+# to control per-session rendering, --deleted to include deleted sessions)
+format_session.py --all
+
 # Set a display name for a session (requires tasks.db)
 format_session.py --name SESSION_REF "my name"
 
