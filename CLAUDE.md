@@ -478,6 +478,7 @@ Formats Claude Code session `.jsonl` logs for readable terminal output.
 format_session.py --list
 format_session.py --list --deleted      # Include sessions whose files were removed
 format_session.py --list --cwd          # Add a Cwd column tagging each session's project bucket
+format_session.py --list --names        # Add the Name column (display name / custom title; off by default)
 
 # View a session by name, custom title, or ID prefix
 format_session.py gnumach               # By custom title (from /rename)

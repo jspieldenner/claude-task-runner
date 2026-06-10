@@ -741,7 +741,7 @@ def scan_sessions(db):
     db.commit()
 
 
-def list_sessions(show_deleted=False, show_cwd=False):
+def list_sessions(show_deleted=False, show_cwd=False, show_name=False):
     """List interactive (non-task) sessions from the cache."""
     if not os.path.isdir(PROJECTS_ROOT):
         print(f"Projects root not found: {PROJECTS_ROOT}", file=sys.stderr)
@@ -768,13 +768,24 @@ def list_sessions(show_deleted=False, show_cwd=False):
         print("No interactive sessions found.")
         return
 
+    # Columns are assembled dynamically: Date, Size, Msgs and ID are always
+    # shown; Cwd (--cwd) and Name (--names) are opt-in. The Name column is
+    # off by default — the ID column identifies a session unambiguously, and
+    # long auto-titles (e.g. "...(Branch)") otherwise overflow and shove the
+    # First-message preview off-screen.
     cwd_w = 24
+    header = f"{'Date':<18}  {'Size':>6}  {'Msgs':>4}  {'ID':<8}"
+    sep = f"{'─' * 18}  {'─' * 6}  {'─' * 4}  {'─' * 8}"
     if show_cwd:
-        print(f"{'Date':<18}  {'Size':>6}  {'Msgs':>4}  {'ID':<8}  {'Cwd':<{cwd_w}}  {'Name':<20}  First message")
-        print(f"{'─' * 18}  {'─' * 6}  {'─' * 4}  {'─' * 8}  {'─' * cwd_w}  {'─' * 20}  {'─' * 40}")
-    else:
-        print(f"{'Date':<18}  {'Size':>6}  {'Msgs':>4}  {'ID':<8}  {'Name':<20}  First message")
-        print(f"{'─' * 18}  {'─' * 6}  {'─' * 4}  {'─' * 8}  {'─' * 20}  {'─' * 40}")
+        header += f"  {'Cwd':<{cwd_w}}"
+        sep += f"  {'─' * cwd_w}"
+    if show_name:
+        header += f"  {'Name':<20}"
+        sep += f"  {'─' * 20}"
+    header += "  First message"
+    sep += f"  {'─' * 40}"
+    print(header)
+    print(sep)
     for (sid, first_ts, file_size, user_msg_count, display_name, custom_title,
          first_user_msg, deleted, project_dir, cwd) in rows:
         ts = first_ts or ""
@@ -791,10 +802,6 @@ def list_sessions(show_deleted=False, show_cwd=False):
         else:
             size_str = f"{size_kb}K"
 
-        name = display_name or custom_title or "—"
-        if deleted:
-            name = f"{name} [deleted]"
-
         preview = first_user_msg or "(empty)"
         max_preview = 60
         if len(preview) > max_preview:
@@ -802,13 +809,21 @@ def list_sessions(show_deleted=False, show_cwd=False):
         preview = preview.replace("\n", " ")
 
         short_id = (sid or "")[:8]
+        line = f"{ts:<18}  {size_str:>6}  {user_msg_count:>4}  {short_id:<8}"
         if show_cwd:
             cwd_disp = _format_cwd(cwd, project_dir)
             if len(cwd_disp) > cwd_w:
                 cwd_disp = cwd_disp[:cwd_w - 1] + "…"
-            print(f"{ts:<18}  {size_str:>6}  {user_msg_count:>4}  {short_id:<8}  {cwd_disp:<{cwd_w}}  {name:<20}  {preview}")
-        else:
-            print(f"{ts:<18}  {size_str:>6}  {user_msg_count:>4}  {short_id:<8}  {name:<20}  {preview}")
+            line += f"  {cwd_disp:<{cwd_w}}"
+        if show_name:
+            name = display_name or custom_title or "—"
+            if deleted:
+                name = f"{name} [deleted]"
+            line += f"  {name:<20}"
+        elif deleted:
+            preview = f"[deleted] {preview}"
+        line += f"  {preview}"
+        print(line)
 
 
 def resolve_session(name):
@@ -1027,6 +1042,12 @@ def main():
              "(useful for distinguishing sessions across project buckets)"
     )
     parser.add_argument(
+        "--names", action="store_true",
+        help="Include the Name column (display name / custom title) in "
+             "--list output (off by default; the ID column identifies "
+             "sessions, and long auto-titles overflow the preview)"
+    )
+    parser.add_argument(
         "--name", nargs=2, metavar=("SESSION", "NAME"),
         help="Set a display name for a session (use empty string to clear)"
     )
@@ -1095,7 +1116,7 @@ def main():
         return
 
     if args.list:
-        list_sessions(show_deleted=args.deleted, show_cwd=args.cwd)
+        list_sessions(show_deleted=args.deleted, show_cwd=args.cwd, show_name=args.names)
         return
 
     if not args.file:
