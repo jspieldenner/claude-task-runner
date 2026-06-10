@@ -770,11 +770,11 @@ def list_sessions(show_deleted=False, show_cwd=False):
 
     cwd_w = 24
     if show_cwd:
-        print(f"{'Date':<18}  {'Size':>6}  {'Msgs':>4}  {'Cwd':<{cwd_w}}  {'Name':<20}  First message")
-        print(f"{'─' * 18}  {'─' * 6}  {'─' * 4}  {'─' * cwd_w}  {'─' * 20}  {'─' * 40}")
+        print(f"{'Date':<18}  {'Size':>6}  {'Msgs':>4}  {'ID':<8}  {'Cwd':<{cwd_w}}  {'Name':<20}  First message")
+        print(f"{'─' * 18}  {'─' * 6}  {'─' * 4}  {'─' * 8}  {'─' * cwd_w}  {'─' * 20}  {'─' * 40}")
     else:
-        print(f"{'Date':<18}  {'Size':>6}  {'Msgs':>4}  {'Name':<20}  First message")
-        print(f"{'─' * 18}  {'─' * 6}  {'─' * 4}  {'─' * 20}  {'─' * 40}")
+        print(f"{'Date':<18}  {'Size':>6}  {'Msgs':>4}  {'ID':<8}  {'Name':<20}  First message")
+        print(f"{'─' * 18}  {'─' * 6}  {'─' * 4}  {'─' * 8}  {'─' * 20}  {'─' * 40}")
     for (sid, first_ts, file_size, user_msg_count, display_name, custom_title,
          first_user_msg, deleted, project_dir, cwd) in rows:
         ts = first_ts or ""
@@ -791,7 +791,7 @@ def list_sessions(show_deleted=False, show_cwd=False):
         else:
             size_str = f"{size_kb}K"
 
-        name = display_name or custom_title or sid[:20]
+        name = display_name or custom_title or "—"
         if deleted:
             name = f"{name} [deleted]"
 
@@ -801,13 +801,14 @@ def list_sessions(show_deleted=False, show_cwd=False):
             preview = preview[:max_preview - 3] + "..."
         preview = preview.replace("\n", " ")
 
+        short_id = (sid or "")[:8]
         if show_cwd:
             cwd_disp = _format_cwd(cwd, project_dir)
             if len(cwd_disp) > cwd_w:
                 cwd_disp = cwd_disp[:cwd_w - 1] + "…"
-            print(f"{ts:<18}  {size_str:>6}  {user_msg_count:>4}  {cwd_disp:<{cwd_w}}  {name:<20}  {preview}")
+            print(f"{ts:<18}  {size_str:>6}  {user_msg_count:>4}  {short_id:<8}  {cwd_disp:<{cwd_w}}  {name:<20}  {preview}")
         else:
-            print(f"{ts:<18}  {size_str:>6}  {user_msg_count:>4}  {name:<20}  {preview}")
+            print(f"{ts:<18}  {size_str:>6}  {user_msg_count:>4}  {short_id:<8}  {name:<20}  {preview}")
 
 
 def resolve_session(name):
