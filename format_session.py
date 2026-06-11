@@ -730,13 +730,18 @@ def scan_sessions(db):
     # Idempotent reclassification: mtime-cached rows weren't re-run
     # through the per-file classifier above, so chat-continuation IDs
     # that were misclassified is_task=1 (via the prefix heuristic in
-    # earlier versions) get corrected here on every scan.
-    db.execute("""
-        UPDATE sessions SET is_chat = 1, is_task = 0
-        WHERE session_id IN (
-            SELECT chat_session_id FROM runs WHERE chat_session_id IS NOT NULL
-        ) AND (is_chat = 0 OR is_task = 1)
-    """)
+    # earlier versions) get corrected here on every scan. Skipped when
+    # there's no `runs` table — i.e. the in-memory fallback used when no
+    # tasks.db is present (a fresh clone with no task runner set up).
+    if db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'"
+    ).fetchone():
+        db.execute("""
+            UPDATE sessions SET is_chat = 1, is_task = 0
+            WHERE session_id IN (
+                SELECT chat_session_id FROM runs WHERE chat_session_id IS NOT NULL
+            ) AND (is_chat = 0 OR is_task = 1)
+        """)
 
     db.commit()
 
