@@ -217,18 +217,19 @@ resets the test task to pending. The loop continues as long as N improves.
 
 ## Agent Types
 
-The default agent types are `opus` and `sonnet`. Any string can be used as
-an agent type — unknown types default to the opus model with no timeout or
-turn limit.
+The default agent types are `opus`, `sonnet`, and `fable`. Any string can be
+used as an agent type — unknown types default to the opus model with no
+timeout or turn limit.
 
 | Type | Model | Use For |
 |------|-------|---------|
 | `opus` | opus | Complex tasks (default) |
 | `sonnet` | sonnet | Straightforward tasks (cheaper/faster) |
+| `fable` | fable | Fable 5 |
 
 To add custom types with different model mappings, edit the `AGENT_MODELS`
 dict near the top of `task_runner.py`. The agent type maps to the `model`
-parameter of the Claude Code Agent tool (`opus`, `sonnet`, `haiku`).
+parameter of the Claude Code Agent tool (`opus`, `sonnet`, `haiku`, `fable`).
 
 ## Task Statuses
 

@@ -56,6 +56,7 @@ LOGS_DIR = os.path.join(PROJECT_DIR, 'logs')
 AGENT_MODELS = {
     "opus": "opus",
     "sonnet": "sonnet",
+    "fable": "fable",
 }
 
 
