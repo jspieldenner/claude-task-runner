@@ -83,6 +83,10 @@ HOME = Path.home()
 COMPACTIONS_DIR = HOME / "project" / "compactions"
 DB_PATH = COMPACTIONS_DIR / "index.db"
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://pony:11434")
+# Fallback when the primary host (pony) is powered down: samsung runs its
+# own ollama with the same bge-m3 model. Embeddings are model-determined,
+# so a locally-embedded query is comparable to the pony-embedded index.
+LOCAL_OLLAMA = "http://localhost:11434"
 EMBED_MODEL = "bge-m3:latest"
 EMBED_DIM = 1024
 
@@ -126,10 +130,44 @@ def open_db():
     return conn
 
 
+_resolved_host = None
+
+
+def ollama_host(probe_timeout=2):
+    """Return a reachable ollama base URL, probing once and caching.
+
+    Tries the configured host (pony by default) first; if it doesn't
+    answer within probe_timeout seconds, falls back to a local ollama.
+    Exits with a clear message if neither is reachable. Probing avoids
+    the 300 s embed timeout hanging the whole run when pony is down.
+    """
+    global _resolved_host
+    if _resolved_host is not None:
+        return _resolved_host
+
+    def reachable(host):
+        try:
+            requests.get(f"{host}/api/version", timeout=probe_timeout)
+            return True
+        except requests.RequestException:
+            return False
+
+    if reachable(OLLAMA_HOST):
+        _resolved_host = OLLAMA_HOST
+    elif LOCAL_OLLAMA != OLLAMA_HOST and reachable(LOCAL_OLLAMA):
+        print(f"{OLLAMA_HOST} unreachable; using local ollama at {LOCAL_OLLAMA}",
+              file=sys.stderr)
+        _resolved_host = LOCAL_OLLAMA
+    else:
+        sys.exit(f"error: no reachable ollama at {OLLAMA_HOST} "
+                 f"or {LOCAL_OLLAMA} — start one or set OLLAMA_HOST")
+    return _resolved_host
+
+
 def embed(texts, timeout=300):
     """POST a list of strings to ollama, return Nx1024 float32 array."""
     r = requests.post(
-        f"{OLLAMA_HOST}/api/embed",
+        f"{ollama_host()}/api/embed",
         json={"model": EMBED_MODEL, "input": texts, "keep_alive": "30m"},
         timeout=timeout,
     )
