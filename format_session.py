@@ -437,9 +437,22 @@ def get_db():
     else:
         db = sqlite3.connect(":memory:")
     db.executescript(SESSIONS_TABLE_SCHEMA)
-    # Migration: add backup_path to pre-existing sessions tables.
+    # Migration: add columns that were introduced after the sessions table
+    # was first created. CREATE TABLE IF NOT EXISTS won't add columns to an
+    # existing table, so a DB created by an older version is missing every
+    # column added since. Each entry is idempotent — only applied if absent.
     cols = {row[1] for row in db.execute("PRAGMA table_info(sessions)")}
     for col, ddl in (
+        ("is_chat", "ALTER TABLE sessions ADD COLUMN is_chat INTEGER DEFAULT 0"),
+        ("has_messages", "ALTER TABLE sessions ADD COLUMN has_messages INTEGER DEFAULT 0"),
+        ("custom_title", "ALTER TABLE sessions ADD COLUMN custom_title TEXT"),
+        ("display_name", "ALTER TABLE sessions ADD COLUMN display_name TEXT"),
+        ("first_ts", "ALTER TABLE sessions ADD COLUMN first_ts TEXT"),
+        ("last_ts", "ALTER TABLE sessions ADD COLUMN last_ts TEXT"),
+        ("user_msg_count", "ALTER TABLE sessions ADD COLUMN user_msg_count INTEGER DEFAULT 0"),
+        ("first_user_msg", "ALTER TABLE sessions ADD COLUMN first_user_msg TEXT"),
+        ("file_size", "ALTER TABLE sessions ADD COLUMN file_size INTEGER"),
+        ("deleted", "ALTER TABLE sessions ADD COLUMN deleted INTEGER DEFAULT 0"),
         ("backup_path", "ALTER TABLE sessions ADD COLUMN backup_path TEXT"),
         ("project_dir", "ALTER TABLE sessions ADD COLUMN project_dir TEXT"),
         ("cwd", "ALTER TABLE sessions ADD COLUMN cwd TEXT"),
