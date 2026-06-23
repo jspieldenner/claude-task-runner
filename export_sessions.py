@@ -22,7 +22,7 @@ import sys
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
-from project_dir import PROJECT_DIR, DB_PATH, HOME_BUCKET_DIR
+from project_dir import PROJECT_DIR, DB_PATH, HOME_BUCKET_DIR, CLAUDE_PROJECTS_ROOT
 CLAUDE_DIR = os.path.expanduser("~/.claude")
 SESSIONS_DIR = HOME_BUCKET_DIR
 MEMORY_DIR = os.path.join(SESSIONS_DIR, "memory")
@@ -31,6 +31,37 @@ HISTORY_FILE = os.path.join(CLAUDE_DIR, "history.jsonl")
 INTERACTIVE_DIR = os.path.join(PROJECT_DIR, "sessions")
 PLAN_DIR = os.path.join(PROJECT_DIR, "plan-sessions")
 MEMORY_EXPORT_DIR = os.path.join(PROJECT_DIR, "memory")
+
+
+def all_bucket_dirs():
+    """Every Claude Code project-bucket directory under ~/.claude/projects.
+
+    Claude Code shards session JSONLs into one bucket per cwd a session
+    was started from (see project_dir.cwd_to_bucket). This export used to
+    scan only the home bucket (HOME_BUCKET_DIR), so any session started
+    from another cwd — a Singular worktree, ~/rustgb, ~/project/reports,
+    etc. — was never backed up and was silently lost when Claude Code's
+    ~30-day GC vacuumed it (e.g. session 76e78f81, the Ardour PR #986
+    design session, cwd ~/Singular-parallel-bba). Scan them all.
+    """
+    if not os.path.isdir(CLAUDE_PROJECTS_ROOT):
+        return []
+    return [os.path.join(CLAUDE_PROJECTS_ROOT, b)
+            for b in os.listdir(CLAUDE_PROJECTS_ROOT)
+            if os.path.isdir(os.path.join(CLAUDE_PROJECTS_ROOT, b))]
+
+
+def find_live_session_files():
+    """Map session_id -> live top-level .jsonl path across every bucket."""
+    live = {}
+    for bucket in all_bucket_dirs():
+        for fname in os.listdir(bucket):
+            if not fname.endswith(".jsonl"):
+                continue
+            path = os.path.join(bucket, fname)
+            if os.path.isfile(path):
+                live.setdefault(fname[:-len(".jsonl")], path)
+    return live
 
 
 def get_renames():
@@ -189,8 +220,9 @@ def export_subagent_logs(dry_run=False):
       sessions/subagents/{parent_session_id}/agent-{agent_id}.jsonl
     """
     created = 0
-    for entry in os.listdir(SESSIONS_DIR):
-        subagents_dir = os.path.join(SESSIONS_DIR, entry, "subagents")
+    bucket_entries = [(b, e) for b in all_bucket_dirs() for e in os.listdir(b)]
+    for bucket, entry in bucket_entries:
+        subagents_dir = os.path.join(bucket, entry, "subagents")
         if not os.path.isdir(subagents_dir):
             continue
         # entry is the parent session ID
@@ -224,10 +256,11 @@ def main():
     # This allows other users to view sessions via format_session.py.
     if not dry_run:
         import subprocess
-        subprocess.run(
-            ["chmod", "-R", "o+rX", SESSIONS_DIR],
-            capture_output=True,
-        )
+        for bucket in all_bucket_dirs():
+            subprocess.run(
+                ["chmod", "-R", "o+rX", bucket],
+                capture_output=True,
+            )
 
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
@@ -248,6 +281,10 @@ def main():
 
     renames = get_renames()
 
+    # Resolve each session's live file across ALL buckets, not just the home
+    # bucket — sessions started from other cwds live in other buckets.
+    live_files = find_live_session_files()
+
     os.makedirs(INTERACTIVE_DIR, exist_ok=True)
     os.makedirs(PLAN_DIR, exist_ok=True)
 
@@ -257,8 +294,8 @@ def main():
 
     for sess in sessions:
         sid = sess["session_id"]
-        src = os.path.join(SESSIONS_DIR, sid + ".jsonl")
-        if not os.path.exists(src):
+        src = live_files.get(sid)
+        if not src or not os.path.exists(src):
             continue
 
         # Determine session type and name
