@@ -164,6 +164,36 @@ def is_compaction_summary(content):
 SKILL_TEXT_PREFIX = "Base directory for this skill:"
 
 
+_COMMAND_NAME_RE = re.compile(r"<command-name>(.*?)</command-name>", re.S)
+_COMMAND_ARGS_RE = re.compile(r"<command-args>(.*?)</command-args>", re.S)
+
+
+def command_line_from_text(text):
+    """If `text` is a slash-command invocation envelope, return the command
+    line the user typed (the command name plus any args); else None.
+
+    Claude Code records a typed slash command as a user message wrapping
+    <command-name>, <command-message>, and <command-args> tags. We show just
+    the command name (with args appended when present) — what was typed —
+    rather than the raw XML.
+    """
+    if not isinstance(text, str):
+        return None
+    stripped = text.lstrip()
+    if not (stripped.startswith("<command-name>")
+            or stripped.startswith("<command-message>")):
+        return None
+    m = _COMMAND_NAME_RE.search(text)
+    if not m:
+        return None
+    name = m.group(1).strip()
+    if not name:
+        return None
+    am = _COMMAND_ARGS_RE.search(text)
+    args = am.group(1).strip() if am else ""
+    return f"{name} {args}" if args else name
+
+
 def skill_name_from_text(text):
     """Extract the skill name from injected skill text, or None.
 
@@ -339,20 +369,24 @@ def process_events(events, width, show_thinking=False, show_system=False,
 def render_user(content, width, show_tool_output=False):
     """Render a user message."""
     if isinstance(content, str):
-        yield wrap_text(content, width, "❯ ", "  ")
+        cmd = command_line_from_text(content)
+        yield wrap_text(cmd if cmd is not None else content, width, "❯ ", "  ")
         return
 
     if isinstance(content, list):
         for item in content:
             if isinstance(item, str):
-                yield wrap_text(item, width, "❯ ", "  ")
+                cmd = command_line_from_text(item)
+                yield wrap_text(cmd if cmd is not None else item, width, "❯ ", "  ")
             elif isinstance(item, dict):
                 if item.get("type") == "tool_result":
                     if show_tool_output:
                         result_content = item.get("content", "")
                         yield format_tool_result(result_content, width)
                 elif item.get("type") == "text":
-                    yield wrap_text(item.get("text", ""), width, "❯ ", "  ")
+                    text = item.get("text", "")
+                    cmd = command_line_from_text(text)
+                    yield wrap_text(cmd if cmd is not None else text, width, "❯ ", "  ")
             # Skip other content types (images, etc.)
 
 
