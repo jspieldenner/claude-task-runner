@@ -32,9 +32,11 @@ Other commands:
 """
 
 import argparse
+import errno
 import json
 import os
 import re
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -1856,11 +1858,84 @@ def resolve_session_id(db, ref):
     return None
 
 
+def courier_socket_path(session_id):
+    """Deterministic AF_UNIX datagram socket path for a session's cc-courier.
+
+    Mirrors ~/project/cc-courier/server.py: the courier binds this socket; this
+    side sends it a zero-length datagram to wake the courier and have it drain
+    the inbox for `session_id`. The path is derived purely from the session id
+    so neither side needs to discover the other.
+    """
+    base = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    return os.path.join(base, "cc-courier", f"{session_id}.sock")
+
+
+def kick_courier(session_id):
+    """Wake the session's cc-courier so it drains the inbox immediately.
+
+    Sends a single zero-length datagram (a pure wake signal — the durable queue
+    is the `inbox` table; the kick only tells the courier "go check the table
+    now", so there is no polling). Returns True if a live courier received the
+    kick, False if no courier is listening:
+      - ENOENT     -> the socket path was never created (no courier this session)
+      - ECONNREFUSED -> a stale socket left by a dead courier
+    Either way the caller falls back to the hook path (the row is already queued
+    in the inbox). A kick that lands while the courier is mid-drain is buffered
+    by the kernel and delivered on its next recv, so it is never lost.
+    """
+    path = courier_socket_path(session_id)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        s.sendto(b"", path)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        if e.errno in (errno.ECONNREFUSED, errno.ENOENT):
+            return False
+        print(f"kick_courier: unexpected error kicking session "
+              f"{session_id[:8]}: {e!r}", file=sys.stderr)
+        return False
+    finally:
+        s.close()
+
+
+def select_session_inbox(db, session_id):
+    """Return undelivered inbox rows targeted directly at a session.
+
+    Shared by drain_inbox (hook path) and cc-courier (live-push path). Returns
+    rows with (id, message) for rows whose `session_id` matches and that have
+    not been delivered. Does NOT include the chat-task fallback rows that
+    drain_inbox also handles (those are task-keyed and only relevant to the
+    hook running inside a --chat session). The caller is responsible for marking
+    rows delivered (see mark_inbox_delivered) — the courier does this only after
+    a successful channel push, so the SELECT must not mark anything itself.
+    """
+    return db.execute(
+        "SELECT id, message FROM inbox "
+        "WHERE session_id = ? AND delivered_at IS NULL ORDER BY id",
+        (session_id,),
+    ).fetchall()
+
+
+def mark_inbox_delivered(db, ids):
+    """Mark the given inbox row ids as delivered (sets delivered_at). Commits."""
+    if not ids:
+        return
+    db.executemany(
+        "UPDATE inbox SET delivered_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [(i,) for i in ids],
+    )
+    db.commit()
+
+
 def send_session_message(db, session_id, message):
     """Queue a message for delivery to a specific Claude Code session.
 
-    Delivered by drain_inbox when a hook fires with matching session_id.
-    Not tied to any task.
+    Always inserts the row first (the inbox table is the durable queue), so the
+    message is delivered even if no courier is running — drain_inbox delivers it
+    on the session's next hook fire. The caller (--send-session) then kicks the
+    courier for live delivery; on a failed kick the row simply waits for a hook.
     """
     db.execute(
         "INSERT INTO inbox (task_id, agent_id, session_id, message) "
@@ -1868,7 +1943,6 @@ def send_session_message(db, session_id, message):
         (session_id, message),
     )
     db.commit()
-    print(f"Queued message for session {session_id[:8]} (will be delivered on its next hook fire)")
     return True
 
 
@@ -2007,11 +2081,7 @@ def drain_inbox(db):
                 (session_id, task_row["task_id"]),
             ).fetchall()
         else:
-            rows = db.execute(
-                "SELECT id, message FROM inbox "
-                "WHERE session_id = ? AND delivered_at IS NULL ORDER BY id",
-                (session_id,),
-            ).fetchall()
+            rows = select_session_inbox(db, session_id)
     else:
         return True
 
@@ -2865,8 +2935,17 @@ def main():
         session_id = resolve_session_id(db, args.send_session[0])
         if session_id is None:
             sys.exit(1)
+        # Always queue the row first (durable queue), THEN kick the courier so
+        # the row is visible by the time the courier drains. Never kick before
+        # the commit.
         if not send_session_message(db, session_id, message):
             sys.exit(1)
+        if kick_courier(session_id):
+            print(f"Queued + kicked cc-courier for session {session_id[:8]} "
+                  f"(live delivery)")
+        else:
+            print(f"Queued message for session {session_id[:8]} "
+                  f"(no live courier — will be delivered on its next hook fire)")
     elif args.send_agent:
         if len(args.send_agent) == 1:
             message = sys.stdin.read()

@@ -627,9 +627,63 @@ echo "longer message" | task_runner.py --send-agent a0a63f97d5c6c64e9   # messag
 This inserts an `inbox` row keyed straight to that `agent_id` (task_id and
 session_id NULL); `--drain-inbox` delivers it on the subagent's next tool call,
 same as `--send`. If the `agent_id` matches a known run, the confirmation notes
-the task name and whether that run is still live. (`--send-session UUID` is the
-analogous command for targeting a whole interactive session by its UUID,
-prefix, display name, or custom title.)
+the task name and whether that run is still live.
+
+### Two delivery paths: courier push (sessions) vs inbox+hook (tasks/agents)
+
+There are two ways a queued `inbox` row reaches its target, and `--send-*`
+picks the right one automatically:
+
+- **`--send` (tasks) and `--send-agent` (subagents)** stay on the
+  **inbox+hook** path: the row is delivered when the target's `PreToolUse` /
+  `UserPromptSubmit` hook fires `--drain-inbox`. A *running* task/subagent keeps
+  making tool calls, so the hook fires promptly. A channel push can't help here
+  anyway — a channel always pushes to the **parent** session, never into a
+  subagent (the "hokey relay" case we avoid).
+
+- **`--send-session` (whole interactive sessions)** uses the **cc-courier
+  channel push** for *immediate* delivery, falling back to the hook when no
+  courier is running. This matters because an **idle** interactive session
+  (model at rest, waiting for the user) never fires a hook, so the inbox+hook
+  path alone would leave the message undelivered until the user next typed
+  something.
+
+### Messaging a whole session (`--send-session`) — live via cc-courier
+
+```bash
+task_runner.py --send-session 3f2a91c4 "switch the analysis to the -O3 build"
+task_runner.py --send-session "my chat name" "..."   # by display name / custom title
+echo "longer message" | task_runner.py --send-session 3f2a91c4
+```
+
+`REF` resolves to a session UUID by full UUID, prefix, display name, or custom
+title. The command **always inserts the inbox row first** (the table is the
+durable queue), **then** kicks the session's courier:
+
+- *"Queued + kicked cc-courier … (live delivery)"* — a live courier received
+  the kick and will channel-push the message as a new turn within a few seconds,
+  even if the session is idle.
+- *"Queued … (no live courier — will be delivered on its next hook fire)"* —
+  no courier socket was reachable; the row stays in the inbox and the
+  `--drain-inbox` hook delivers it on the session's next activity. Behaviour
+  degrades gracefully.
+
+The courier is the MCP server `~/project/cc-courier/server.py` (see its
+README). Claude Code spawns one per session (registered in `~/.mcp.json`).
+**Live delivery requires Claude Code to be launched with the courier named as
+a channel:**
+
+```
+claude --dangerously-load-development-channels server:bash-mcp server:cc-courier …
+```
+
+Without that flag the courier still runs but detects the missing flag and
+**leaves rows undelivered** (does not falsely mark them delivered), so
+`--send-session` silently falls back to the hook path. Use the courier's
+`courier_status()` tool to see whether live delivery is active for the current
+session. The kick is a zero-length datagram to
+`${XDG_RUNTIME_DIR:-/tmp}/cc-courier/<session_id>.sock` — a pure wake signal;
+the inbox table remains the source of truth.
 
 ### Installing the hooks
 
