@@ -490,6 +490,7 @@ format_session.py gnumach -t            # Show timestamps
 format_session.py gnumach --tools       # Show tool calls
 format_session.py gnumach --tool-output # Show tool results (implies --tools)
 format_session.py gnumach --thinking    # Show thinking blocks
+format_session.py gnumach --skills      # Show injected skill (SKILL.md) text
 format_session.py gnumach --all         # Show everything
 
 # Render every --list session to stdout, newest first, one after another.

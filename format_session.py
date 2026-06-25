@@ -158,6 +158,27 @@ def is_compaction_summary(content):
     return text.startswith("This session is being continued from a previous conversation")
 
 
+# Prefix of the meta user message Claude Code injects to deliver a skill's
+# SKILL.md text after a Skill tool_use. The injected event is a user message
+# with isMeta=True whose first text block starts with this string.
+SKILL_TEXT_PREFIX = "Base directory for this skill:"
+
+
+def skill_name_from_text(text):
+    """Extract the skill name from injected skill text, or None.
+
+    The first line is `Base directory for this skill: <path>/<name>`; the
+    skill name is the final path component.
+    """
+    if not text:
+        return None
+    first_line = text.split("\n", 1)[0]
+    path = first_line[len(SKILL_TEXT_PREFIX):].strip()
+    if not path:
+        return None
+    return os.path.basename(path.rstrip("/")) or None
+
+
 def format_timestamp(ts):
     """Format an ISO timestamp as a short local time string."""
     if not ts:
@@ -172,7 +193,7 @@ def format_timestamp(ts):
 
 def process_events(events, width, show_thinking=False, show_system=False,
                    show_tools=False, show_tool_output=False, show_compaction=False,
-                   show_timestamps=False):
+                   show_timestamps=False, show_skills=False):
     """Process events and yield formatted output lines."""
 
     # Deduplicate: streaming sends multiple events per message ID.
@@ -192,7 +213,7 @@ def process_events(events, width, show_thinking=False, show_system=False,
         if etype == "user":
             msg = event.get("message", {})
             content = msg.get("content", "")
-            # Skip task-notification system messages injected as user events
+            # Find the first text in the message for classification below.
             content_str = content if isinstance(content, str) else ""
             if isinstance(content, list):
                 for item in content:
@@ -202,6 +223,20 @@ def process_events(events, width, show_thinking=False, show_system=False,
                     elif isinstance(item, dict) and item.get("type") == "text":
                         content_str = item.get("text", "")
                         break
+            # Skill invocations inject the skill's SKILL.md text as a meta
+            # user message. Hide it by default (it's tool plumbing, not user
+            # input); --skills includes it. Checked before the
+            # task-notification filter below because a skill's text may
+            # itself mention "<task-notification>" (the task-orchestrator
+            # skill does), which must not cause it to be silently dropped.
+            if event.get("isMeta") and content_str.startswith(SKILL_TEXT_PREFIX):
+                skill_name = skill_name_from_text(content_str)
+                if show_skills:
+                    merged.append(("user", content, ts))
+                else:
+                    merged.append(("skill_marker", skill_name, ts))
+                continue
+            # Skip task-notification system messages injected as user events
             if "<task-notification>" in content_str:
                 continue
             if not show_compaction and is_compaction_summary(content):
@@ -286,6 +321,11 @@ def process_events(events, width, show_thinking=False, show_system=False,
 
         elif entry_type == "compaction_marker":
             yield f"{ts_prefix}--- (compaction summary omitted, use --compaction to show) ---"
+            yield ""
+
+        elif entry_type == "skill_marker":
+            label = f'"{data}" ' if data else ""
+            yield f"{ts_prefix}--- (skill {label}text omitted, use --skills to show) ---"
             yield ""
 
         elif entry_type == "system":
@@ -1192,6 +1232,11 @@ def main():
         help="Show compaction summaries (hidden by default)"
     )
     parser.add_argument(
+        "--skills", action="store_true",
+        help="Show the skill instruction text injected when a skill is "
+             "invoked (hidden by default)"
+    )
+    parser.add_argument(
         "--all", action="store_true",
         help="With a session: show everything (tools, tool output, thinking, "
              "system, compaction). Without one: render every --list session "
@@ -1217,6 +1262,7 @@ def main():
         args.tools = True
         args.tool_output = True
         args.compaction = True
+        args.skills = True
 
     if args.name:
         set_display_name(args.name[0], args.name[1])
@@ -1245,6 +1291,7 @@ def main():
                 show_tool_output=args.tool_output,
                 show_compaction=args.compaction,
                 show_timestamps=args.timestamps,
+                show_skills=args.skills,
             )
             return
         parser.error("session name or file is required (or use --list / --all)")
@@ -1265,6 +1312,7 @@ def main():
         show_tool_output=args.tool_output,
         show_compaction=args.compaction,
         show_timestamps=args.timestamps,
+        show_skills=args.skills,
     ):
         print(line)
 
