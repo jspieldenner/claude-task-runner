@@ -46,7 +46,7 @@ CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
 # Add SCRIPT_DIR to path so we can import project_dir
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
-from project_dir import PROJECT_DIR, DB_PATH, HOME_BUCKET_DIR
+from project_dir import PROJECT_DIR, DB_PATH, HOME_BUCKET_DIR, CLAUDE_PROJECTS_ROOT
 
 LOGS_DIR = os.path.join(PROJECT_DIR, 'logs')
 
@@ -217,8 +217,12 @@ def handle_failure(db, task, error_reason, run_id):
 
 
 def discover_repos():
-    """Find all git repos/worktrees under ~/."""
-    home = os.path.expanduser("~")
+    """Find all git repos/worktrees under the repos root.
+
+    Defaults to ~/ (host); set TASK_RUNNER_REPOS_ROOT to scan elsewhere (e.g.
+    /opt in the container-only layout, where the repos live under /opt).
+    """
+    home = os.environ.get("TASK_RUNNER_REPOS_ROOT") or os.path.expanduser("~")
     repos = {}
 
     # Scan ~ for git repos (directories with .git dir or file)
@@ -354,8 +358,8 @@ def post_task_commit(db, run_id, task_name):
 
 
 def commit_specific_files(db, run_id, task_name, files):
-    """Commit specific files as artifacts of a task. Files are paths relative to ~/."""
-    home = os.path.expanduser("~")
+    """Commit specific files as artifacts of a task. Files are paths relative to the repos root."""
+    home = os.environ.get("TASK_RUNNER_REPOS_ROOT") or os.path.expanduser("~")
     repos = discover_repos()
     committed_files = []
     touched_repos = set()
@@ -2016,8 +2020,8 @@ def find_subagent_log(agent_id):
     """
     import glob
     patterns = [
-        os.path.expanduser(f"~/.claude/projects/*/subagents/agent-{agent_id}.jsonl"),
-        os.path.expanduser(f"~/.claude/projects/*/*/subagents/agent-{agent_id}.jsonl"),
+        os.path.join(CLAUDE_PROJECTS_ROOT, "*", "subagents", f"agent-{agent_id}.jsonl"),
+        os.path.join(CLAUDE_PROJECTS_ROOT, "*", "*", "subagents", f"agent-{agent_id}.jsonl"),
         os.path.join(PROJECT_DIR, "sessions", "subagents", "*", f"agent-{agent_id}.jsonl"),
     ]
     for pattern in patterns:
@@ -2868,8 +2872,8 @@ def main():
         # Build index of subagent logs: [(agent_id, path, task_name_or_None, first_user_msg)]
         subagent_logs = []
         patterns = [
-            os.path.expanduser("~/.claude/projects/*/subagents/agent-*.jsonl"),
-            os.path.expanduser("~/.claude/projects/*/*/subagents/agent-*.jsonl"),
+            os.path.join(CLAUDE_PROJECTS_ROOT, "*", "subagents", "agent-*.jsonl"),
+            os.path.join(CLAUDE_PROJECTS_ROOT, "*", "*", "subagents", "agent-*.jsonl"),
         ]
         all_log_paths = []
         for pat in patterns:

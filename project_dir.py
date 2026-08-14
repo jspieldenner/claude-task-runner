@@ -49,6 +49,10 @@ def cwd_to_bucket(cwd):
     return cwd.replace("/", "-")
 
 
-CLAUDE_PROJECTS_ROOT = os.path.expanduser("~/.claude/projects")
+# Honor CLAUDE_CONFIG_DIR (Claude Code's relocatable state dir) so this works
+# in-container where state lives at /opt/.claude, not ~/.claude. Defaults to
+# ~/.claude on the host, so host behavior is unchanged.
+CLAUDE_PROJECTS_ROOT = os.path.join(
+    os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")), "projects")
 HOME_BUCKET = cwd_to_bucket(os.path.expanduser("~"))
 HOME_BUCKET_DIR = os.path.join(CLAUDE_PROJECTS_ROOT, HOME_BUCKET)
