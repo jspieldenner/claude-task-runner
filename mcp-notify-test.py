@@ -1,10 +1,11 @@
 """
-Experimental MCP server to test whether server-initiated notifications
-surface to a running Claude Code conversation.
+Experimental MCP server to test how server-initiated messages surface
+to a running Claude Code conversation.
 
-Exposes tools that cause the server to send `notifications/message`
-(MCP LoggingMessageNotification) back to the client — immediately,
-after a delay, or via an external trigger file.
+Exposes tools that send `notifications/message` (MCP
+LoggingMessageNotification) to the client immediately, after a delay, or
+via an external trigger file. Also exposes ask_user (elicitation/create)
+and ask_model (sampling/createMessage).
 """
 import asyncio
 import os
@@ -70,8 +71,9 @@ async def notify_after(ctx: Context, message: str, delay_seconds: float, level: 
 @mcp.tool()
 async def watch_trigger_file(ctx: Context, filename: str = "inbox", level: LogLevel = "info") -> str:
     """
-    Start watching /tmp/mcp-notify-test/<filename>. Whenever the file is
-    written to (or appended to), its new contents are sent as a notification.
+    Start watching /tmp/mcp-notify-test/<filename>. Every 0.5s the file size
+    is checked. When it grows, each new non-blank line is sent as its own
+    notification. Overwrites that do not grow the file send nothing.
 
     This lets an external process inject messages into the running conversation
     by simply writing to the file:
@@ -120,7 +122,7 @@ async def watch_trigger_file(ctx: Context, filename: str = "inbox", level: LogLe
 async def ask_user(ctx: Context, message: str) -> str:
     """
     Use MCP elicitation/create to ask the user for input during a tool call.
-    Returns the user's answer (or a marker if declined/cancelled).
+    Returns "action=<accept|decline|cancel> content=<form data or None>".
     """
     schema = {
         "type": "object",

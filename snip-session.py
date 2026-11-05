@@ -10,14 +10,15 @@ A "user-input" event is a `type:"user"` event whose `message.content`
 contains no tool_result blocks — i.e., an actual user-typed message,
 not a tool result that the protocol wraps in a user role.
 
-Output goes to ~/.claude/projects/-home-claude/<new-uuid>.jsonl,
-mirroring the chat-clone pattern from `task_runner.py --chat`. The
-original session JSONL is not modified.
+Output goes to ~/.claude/projects/-home-claude/<new-uuid>.jsonl
+(hardcoded). task_runner.py --chat uses the current user's home bucket
+instead. The original session JSONL is not modified.
 
 Usage:
     snip-session.py <source.jsonl> <match-text>
     snip-session.py --substring <source.jsonl> <match-text>
-    snip-session.py --list <source.jsonl>           # preview user msgs
+    snip-session.py --at-assistant <source.jsonl> <match-text>   # keep the matched assistant msg, cut after it
+    snip-session.py --list [--at-assistant] <source.jsonl>        # preview messages
 
 Prints the new session UUID on stdout.
 """
@@ -108,7 +109,8 @@ def main():
     ap.add_argument("match", nargs="?", default=None,
                     help="Pattern to match against the chosen role's message")
     ap.add_argument("--substring", action="store_true",
-                    help="Match as substring (default: prefix for user, substring for assistant)")
+                    help="Match user messages as a substring instead of a prefix "
+                         "(assistant matches are always substring)")
     ap.add_argument("--at-assistant", action="store_true",
                     help="Match an assistant message instead of a user message. "
                          "Keeps the matching message (drops everything after it). "
@@ -135,8 +137,8 @@ def main():
     if args.at_assistant:
         # Find the matching assistant; cut AFTER it (cut_line = match_line + 1)
         target = args.match
-        substring = True if not args.substring else True  # default to substring
-        # Allow explicit prefix mode if user really wants it
+        substring = True if not args.substring else True
+        # Assistant matches are always substring. There is no prefix mode.
         substring = True
         match_line = None
         matched_text = None

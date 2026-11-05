@@ -9,7 +9,7 @@ One artifact, one audience:
 
 | Artifact | Audience | Path |
 |----------|----------|------|
-| Compaction summary | A future Claude picking the session back up | `~/compactions/session-<ID>.md` |
+| Compaction summary | A future Claude picking the session back up | `~/project/compactions/session-<ID>.md` |
 
 The compaction is named by session ID, so re-running
 `end` in the same session lands on the same paths — useful both for
@@ -47,7 +47,7 @@ a duplicate.
 - If you're not sure (context was compacted, this is a continuation
   session), look for a compaction file with a recent mtime:
   ```bash
-  find ~/compactions -name 'session-*.md' -mmin -120 -printf '%T+ %f\n'
+  find ~/project/compactions -name 'session-*.md' -mmin -120 -printf '%T+ %f\n'
   ```
   If exactly one matches, use its UUID. If multiple match (rare,
   only when concurrent sessions overlap) or zero match, fall back
@@ -84,7 +84,7 @@ first-run workflow's marker dance to derive the new ID, then proceed.
 
 ### Step 2 — read the existing compaction
 
-Path: `~/compactions/session-<ID>.md`. Pull one thing out:
+Path: `~/project/compactions/session-<ID>.md`. Pull one thing out:
 
 - **Boundary.** The compaction's `<analysis>` block stops at some
   point in the conversation. Anything past that point is "new
@@ -213,7 +213,7 @@ Don't proceed past this step without a session ID.
 
 #### Compaction summary (for a future Claude)
 
-Path: `~/compactions/session-<ID>.md`. Structure and content
+Path: `~/project/compactions/session-<ID>.md`. Structure and content
 per `COMPACT.md` (in this skill directory) — progress-report half
 on top, `---`, then the `<analysis>` + `<summary>` blocks following
 `COMPACT_PROMPT.md` (also in this directory).

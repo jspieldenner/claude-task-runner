@@ -4,22 +4,22 @@
 # The -u flag disables Python's output buffering so log files are written in
 # real-time and log output appears immediately instead of after the buffer fills.
 """
-Task runner for the minimal associated primes project.
+Task runner for Claude Code agents.
 
 Manages a SQLite database of tasks with prompts, dependencies, and iterative
 chains. Tasks are executed via the Claude Code Agent tool from within an
 interactive Claude Code session — NOT via `claude --print` subprocesses.
 
 Workflow:
-    1. python3 task_runner.py --prepare NAME    # Mark running, output prompt
+    1. python3 task_runner.py --prepare NAME               # Create run record, output prompt
     2. Use the Claude Code Agent tool with the prompt
-    3. python3 task_runner.py --complete NAME --result-status success [--result-value "N/M"]
-       (pipe agent output via stdin to record it)
+    3. python3 task_runner.py --set-agent-id NAME AGENT_ID # Mark running
+    4. python3 task_runner.py --complete NAME              # Read subagent log, parse TASK_RESULT
 
 Other commands:
     python3 task_runner.py --list           # List all tasks and status
     python3 task_runner.py --status         # Show detailed status
-    python3 task_runner.py --reset NAME     # Reset a failed/interrupted task to pending
+    python3 task_runner.py --reset NAME     # Reset any task that is not pending or running to pending
     python3 task_runner.py --resume         # Reset all interrupted tasks to pending
     python3 task_runner.py --hold NAME      # Put a task on hold
     python3 task_runner.py --unhold NAME    # Remove hold, return to pending
@@ -189,7 +189,7 @@ def handle_failure(db, task, error_reason, run_id):
         print(f"\n  → on_partial_failure target '{opf_target}' not found")
         return None
 
-    # Build context to prepend to the fix task's prompt
+    # Build context to append to the fix task's prompt
     context = (
         f"The test task \"{task['name']}\" reported: TASK_RESULT: FAILURE {new_value}\n"
     )
@@ -220,7 +220,7 @@ def handle_failure(db, task, error_reason, run_id):
 
 
 def discover_repos():
-    """Find all git repos/worktrees under ~/."""
+    """Find git repos that are direct children of ~/, their worktrees under ~/, and ~ itself."""
     home = os.path.expanduser("~")
     repos = {}
 
@@ -541,8 +541,8 @@ def stream_json_to_session_jsonl(log_path, dst_path, initial_prompt):
     (cost_report dedupes against the filename's UUID, so history copied
     in this way isn't double-counted).
 
-    Returns the session UUID written to dst_path's basename (caller
-    derives that), or None on failure.
+    Returns True on success, False if log_path is missing. The caller
+    derives the session UUID from dst_path's basename.
     """
     import uuid as _uuid
 
@@ -986,12 +986,11 @@ def show_status(db):
 
 
 def get_ready_tasks(db):
-    """Find pending tasks with all dependencies completed.
+    """Find pending tasks with all dependencies completed, sorted by priority
+    (highest first).
 
-    Respects resource groups: if a task in the same resource_group is
-    already running, the task is not considered ready. This prevents, e.g.,
-    two `make -j4` builds from running simultaneously on a 4-core machine
-    and thrashing. Tasks 2, 3, and 11 share the 'local-build' resource group.
+    Respects resource groups: a task is skipped if another task in its
+    resource_group is running or already picked in this pass.
     """
     tasks = db.execute("SELECT * FROM tasks").fetchall()
     task_map = {t["name"]: dict(t) for t in tasks}
@@ -1035,7 +1034,7 @@ def get_ready_tasks(db):
 
 
 def reset_task(db, name):
-    """Reset a failed, interrupted, timed-out, or max-turns task back to pending."""
+    """Reset any task that is not pending or running back to pending. Refuses running tasks."""
     # Check for running task first — refuse to reset to avoid orphaning the active agent
     task = db.execute("SELECT status FROM tasks WHERE name = ?", (name,)).fetchone()
     if task is None:
@@ -1729,8 +1728,9 @@ def log_task(db, name, verbosity=0, timestamps=False):
 def set_agent_id(db, name, agent_id):
     """Record the Agent tool's agent ID on the most recent run.
 
-    Called after the Agent tool returns, so --tail can find the subagent's
-    live log file at ~/.claude/projects/.../subagents/agent-{agentId}.jsonl.
+    Call it right after the Agent tool launches. It marks the task running,
+    assigns queued inbox messages to this agent, and lets --tail find the
+    live log at ~/.claude/projects/.../subagents/agent-{agentId}.jsonl.
     """
     task = db.execute("SELECT id FROM tasks WHERE name = ?", (name,)).fetchone()
     if task is None:
@@ -2327,7 +2327,7 @@ def chat_task(db, name, model=None):
 def continue_task(db, name, prompt=None):
     """Mark a task for continuation with optional prompt.
 
-    Works with failed, interrupted, timed-out, max-turns, or completed tasks.
+    Works with failed, interrupted, timed-out, max-turns, usage-limit, completed, or pending tasks.
     Sets the task to pending with pending_context that will be appended to
     the prompt on the next --prepare.
 
@@ -2618,12 +2618,12 @@ def main():
     parser.add_argument("--activity", nargs="?", const=20, type=int, metavar="N",
                         help="Show recent activity across tasks and interactive sessions (default: 20)")
     parser.add_argument("--status", action="store_true", help="Show detailed status")
-    parser.add_argument("--prepare", metavar="NAME", help="Prepare a task: mark running, output prompt for Agent tool")
+    parser.add_argument("--prepare", metavar="NAME", help="Prepare a task: create a run record, output prompt for Agent tool")
     parser.add_argument("--complete", metavar="NAME", help="Record completion of a task run via Agent tool")
     parser.add_argument("--output-file", metavar="PATH", help="File containing agent output for --complete")
     parser.add_argument("--agent-id", metavar="ID", help="Agent ID for --complete (enables --chat)")
     parser.add_argument("--pending", action="store_true", help="Show tasks that would run next")
-    parser.add_argument("--reset", metavar="NAME", help="Reset a failed/interrupted task")
+    parser.add_argument("--reset", metavar="NAME", help="Reset any task that is not pending or running to pending")
     parser.add_argument("--resume", action="store_true", help="Reset all interrupted tasks to pending")
     parser.add_argument("--hold", metavar="NAME", help="Put a task on hold")
     parser.add_argument("--unhold", metavar="NAME", help="Remove hold from a task")
@@ -2659,15 +2659,15 @@ def main():
     parser.add_argument("--backup", action="store_true", help="Export sessions, commit changes, and push to backup remote")
     parser.add_argument("--find-agents", action="store_true", help="Scan subagent logs to fill in missing agent_ids")
     parser.add_argument("--continue", metavar="NAME", dest="continue_task",
-                        help="Continue an interrupted, timed-out, or max-turns task")
+                        help="Set a failed, interrupted, timed-out, max-turns, usage-limit, completed or pending task to pending with a continuation note")
     parser.add_argument("--prompt", metavar="TEXT", dest="continue_prompt",
                         help="Custom prompt for --continue (default: 'Continue where you left off.')")
     parser.add_argument("--create", metavar="NAME", nargs="?", const="--help", help="Create a new task")
     parser.add_argument("--agent", metavar="TYPE", help="Agent type (default: opus). For --create or --set")
     parser.add_argument("--description", metavar="DESC", dest="task_description", help="Description for --create")
     parser.add_argument("--depends", metavar="DEP", help="Comma-separated dependency task names for --create or --set")
-    parser.add_argument("--max-turns", metavar="N", help="Max turns (0 = unlimited, 'default' = reset). For --create or --set")
-    parser.add_argument("--timeout", metavar="SECS", help="Timeout in seconds (0 = unlimited, 'default' = reset). For --create or --set")
+    parser.add_argument("--max-turns", metavar="N", help="Max turns, stored and shown in --list only, not enforced ('default' clears it). For --create or --set")
+    parser.add_argument("--timeout", metavar="SECS", help="Timeout in seconds, stored and shown in --list only, not enforced ('default' clears it). For --create or --set")
     parser.add_argument("--on-partial-failure", metavar="TASK", help="Task to activate on partial failure. For --create or --set")
     parser.add_argument("--rerun-after", metavar="TASK", help="Task to re-run after success. For --create or --set")
     parser.add_argument("--iterate-limit", metavar="N", type=int, default=5, help="Max iterations for partial failure chain (default: 5). For --create or --set")
@@ -3281,8 +3281,8 @@ def main():
             print(f"                            Types: {', '.join(sorted(AGENT_MODELS.keys()))}")
             print("  --description DESC        Task description")
             print("  --depends DEP[,DEP,...]   Comma-separated dependency task names")
-            print("  --max-turns N             Override default max turns (0 = unlimited)")
-            print("  --timeout SECS            Override default timeout in seconds (0 = unlimited)")
+            print("  --max-turns N             Max turns, stored and shown in --list only, not enforced")
+            print("  --timeout SECS            Timeout in seconds, stored and shown in --list only, not enforced")
             print("  --priority N              Task priority (default: 10, higher runs first)")
             print("  --hold-on-create          Create in 'hold' status")
             print("  --on-partial-failure TASK  Activate TASK on partial failure")
