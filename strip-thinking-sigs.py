@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Clone a Claude Code session JSONL with bulky content stripped.
 
-Mirrors the cloning pattern used by `task_runner.py --chat`:
+Borrows the cloning pattern used by `task_runner.py --chat`:
   - generates a fresh session UUID
   - writes the new JSONL into ~/.claude/projects/-home-claude/<uuid>.jsonl
+    (hardcoded, unlike --chat which uses the current user's home bucket)
   - preserves each event's original sessionId field (so cost accounting
     can deduplicate copied history against the live original)
 
@@ -13,8 +14,9 @@ passes are opt-in via flags, with `--aggressive` enabling all of
 them at sensible defaults.
 
 Cuts:
-  --strip-signatures        (default: on)
-        Blank every thinking block's `signature`. Removes encrypted
+  --no-strip-signatures
+        Signature stripping is on by default. Pass this to keep them.
+        Stripping blanks every thinking block's `signature`. Removes encrypted
         chain-of-reasoning bytes; preserves block structure.
 
   --strip-images
@@ -28,13 +30,18 @@ Cuts:
 
   --truncate-tool-results [N]
         Truncate any tool_result text body whose length exceeds N
-        bytes (default 4096) to "first 1500 chars + ...truncated...
-        + last 500 chars". Both list-of-blocks and bare-string
+        bytes (default 4096) to the first 1500 chars, a
+        "...[N bytes stripped]..." marker, and the last 500 chars.
+        Both list-of-blocks and bare-string
         content shapes are handled.
 
+  --strip-local-command
+        Replace the content of system/local_command events (slash-command
+        rendered output, 256+ chars) with a short stub.
+
   --aggressive
-        Enable strip-images, strip-session-start, and
-        truncate-tool-results at defaults.
+        Enable strip-images, strip-session-start, strip-local-command,
+        and truncate-tool-results at defaults.
 
 A session cloned this way is summarizable (the /end skill can read
 it) but is NOT resumable against the API: signatures are required

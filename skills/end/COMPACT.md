@@ -10,7 +10,7 @@ The file contains, in order:
 1. A session progress report (the conventions are below).
 2. A horizontal rule, then a `/compact`-style structured summary
    (`<analysis>` block followed by `<summary>` block), produced by
-   following the template at `~/project/skills/end/COMPACT_PROMPT.md`.
+   following the template in `COMPACT_PROMPT.md` (in this skill directory).
 
 The compaction file is for a future Claude to read — it's how a
 later session picks up where this one left off. Optimize for that
@@ -72,7 +72,7 @@ move on.
 
 After the `---` separator, append the raw `<analysis>` + `<summary>`
 blocks. The full template lives in
-`~/project/skills/end/COMPACT_PROMPT.md` — read it once and follow it.
+`COMPACT_PROMPT.md` in this skill directory. Read it once and follow it.
 
 ## Re-running in the same session
 

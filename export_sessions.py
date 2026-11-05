@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Export interactive and plan-implementation session logs into ~/project.
+"""Export session logs into the task-runner project dir (PROJECT_DIR).
 
 Creates hardlinks from .claude session files into:
-  ~/project/sessions/       — interactive sessions
-  ~/project/plan-sessions/  — plan implementation sessions
+  sessions/             interactive sessions
+  plan-sessions/        plan implementation sessions
+  sessions/chat/        task_runner.py --chat continuations
+  sessions/subagents/   subagent logs, grouped by parent session ID
+  memory/               memory files from the home bucket
 
 Hardlinks are used because .jsonl files are append-only, so the link
-always reflects the current state without copying.
+always reflects the current state without copying. Unless --dry-run (-n)
+is given, every bucket is first made world-readable (chmod -R o+rX).
 
-Also auto-detects display names:
-  - From /rename commands in ~/.claude/history.jsonl
-  - From plan titles (# Plan: ...) in plan implementation sessions
+Display names come from /rename in ~/.claude/history.jsonl, then an
+existing display name, then a plan title (# Plan: ...), then the custom
+title, then the first 12 characters of the session ID.
 """
 
 import json
@@ -176,7 +180,8 @@ def export_chat_sessions(db, dry_run=False):
     """Hardlink chat continuation JSONLs into ~/project/sessions/chat/.
 
     `task_runner.py --chat` creates these by copying a subagent log to
-    a new UUID under ~/.claude/projects/-home-claude/ and resuming via
+    a new UUID in the home-directory bucket (HOME_BUCKET_DIR) under
+    ~/.claude/projects/ and resuming via
     `claude --resume`. Claude Code's session GC eventually removes the
     live file; this pass preserves a hardlink so the chat conversation
     survives.
@@ -215,7 +220,7 @@ def export_chat_sessions(db, dry_run=False):
 def export_subagent_logs(dry_run=False):
     """Hardlink subagent log files from .claude into ~/project/sessions/subagents/.
 
-    Scans <home-bucket>/*/subagents/ for agent-*.jsonl files
+    Scans <bucket>/*/subagents/ in every project bucket for .jsonl files
     and creates hardlinks preserving the parent session directory structure:
       sessions/subagents/{parent_session_id}/agent-{agent_id}.jsonl
     """

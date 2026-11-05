@@ -14,7 +14,7 @@ The task runner is a management/tracking CLI. Execution happens through the
 Claude Code Agent tool:
 
 ```
-1. task_runner.py --prepare NAME           # Mark running, output prompt
+1. task_runner.py --prepare NAME           # Create run record, output prompt
 2. Use the Agent tool with the prompt      # Claude Code spawns a subagent
 3. task_runner.py --set-agent-id NAME ID   # Record agent ID (enables --tail)
 4. task_runner.py --complete NAME \        # Record result, handle chains
@@ -41,7 +41,9 @@ ln -s ~/project/task_runner.py ~/.local/bin/task_runner.py
 ln -s ~/project/format_session.py ~/.local/bin/format_session.py
 ```
 
-This creates `tasks.db` with the schema and migrations. The database, prompts,
+This creates `tasks.db` with the base schema. Newer columns (such as
+`runs.agent_id` and `inbox.session_id`) are added by migrations the first time
+any `task_runner.py` command opens the database. The database, prompts,
 logs, and docs directories are project-specific data — they're gitignored in
 this repo and belong in your project. The symlinks make the scripts available
 on the PATH from any directory.
@@ -62,7 +64,7 @@ task_runner.py --show NAME -vv          # + tool output
 task_runner.py --show NAME -vvv         # + full file content (Write/Edit bodies)
 
 # Executing (via Agent tool)
-task_runner.py --prepare NAME           # Mark running, output prompt for Agent tool
+task_runner.py --prepare NAME           # Create run record, output prompt for Agent tool
 task_runner.py --complete NAME \        # Record completion after Agent returns
   --output-file /tmp/result.txt        # (or pipe output via stdin)
 task_runner.py --set-agent-id NAME ID   # Record agent ID (for --tail)
@@ -74,7 +76,7 @@ task_runner.py --continue NAME          # Set up a task for continuation
 task_runner.py --continue NAME --prompt "Focus on X"  # With guidance
 
 # Managing
-task_runner.py --reset NAME             # Reset any non-pending task back to pending
+task_runner.py --reset NAME             # Reset any task that is not pending or running back to pending
 task_runner.py --resume                 # Reset all interrupted tasks to pending
 task_runner.py --hold NAME              # Pause a pending task
 task_runner.py --unhold NAME            # Resume a held task
@@ -82,7 +84,14 @@ task_runner.py --kill NAME              # Mark a running task as interrupted
 task_runner.py --sync NAME              # Update task status from session results
 task_runner.py --send NAME "message"    # Queue a message delivered to the task's agent on its next turn
 task_runner.py --send-agent AGENT_ID "message"  # Same, but target a task-less Agent-tool subagent by its agent_id
+task_runner.py --send-session REF "msg" # Message a whole interactive session
 task_runner.py --backup                 # Export sessions, commit, push to backup remote
+task_runner.py --activity [N]           # Recent activity across tasks and sessions (default 20)
+task_runner.py --log NAME               # Formatted stream-json log of the latest run (old runs)
+task_runner.py --inbox [NAME]           # Inbox messages and delivery status
+task_runner.py --clear-inbox            # Delete all inbox rows
+task_runner.py --find-agents            # Fill missing agent_ids from subagent logs
+task_runner.py --chat NAME --model opus # Choose the model for --chat
 
 # Creating (write prompt to prompts/NAME first)
 task_runner.py --create NAME --agent TYPE
@@ -90,13 +99,16 @@ task_runner.py --create NAME --agent TYPE --depends dep1,dep2
 task_runner.py --create NAME --agent TYPE --priority 20   # higher runs first (default: 10)
 
 # Updating task settings (--set ONLY accepts these options)
-task_runner.py --set NAME --max-turns 0            # unlimited turns
-task_runner.py --set NAME --max-turns default      # reset to agent-type default
-task_runner.py --set NAME --timeout 0              # unlimited timeout
-task_runner.py --set NAME --timeout default        # reset to agent-type default
+task_runner.py --set NAME --max-turns N            # stored and shown in --list only, not enforced
+task_runner.py --set NAME --max-turns default      # clear the stored value
+task_runner.py --set NAME --timeout SECS           # stored and shown in --list only, not enforced
+task_runner.py --set NAME --timeout default        # clear the stored value
 task_runner.py --set NAME --priority 20            # higher runs first
 task_runner.py --set NAME --depends dep1,dep2      # set dependencies
 task_runner.py --set NAME --agent sonnet           # change agent type
+task_runner.py --set NAME --on-partial-failure TASK  # set fix task for chains
+task_runner.py --set NAME --rerun-after TASK         # set task to reset after success
+task_runner.py --set NAME --iterate-limit N          # set chain limit (a value of 5 is ignored)
 # NOTE: --set does NOT change status. Use --reset, --hold, --unhold, --kill instead.
 
 # Committing
@@ -104,7 +116,7 @@ task_runner.py --commit NAME file1 file2   # Record files as task artifacts
 ```
 
 **Names vs IDs**: Most commands accept either a task name or numeric ID.
-Partial name matches work if unambiguous.
+Names must match exactly.
 
 **Important**: Do NOT prepare/execute tasks unless explicitly asked.
 Create the task and write its prompt, then let the user decide when to run it.
@@ -123,13 +135,13 @@ When the user asks you to run a task, follow these steps exactly:
 ```bash
 task_runner.py --prepare NAME
 ```
-This marks the task as running, creates a run record, and outputs the
-prompt to stdout. Capture the prompt text. Note the `model=` on stderr.
+This creates a run record and prints the prompt to stdout. It does not
+change the task's status. Capture the prompt text. Note the `model=` on stderr.
 
 ### Step 2: Launch the Agent
 Use the Agent tool with:
 - `prompt`: the **exact, unmodified** text output from --prepare (do not strip, summarize, or reformat it — pass it through verbatim)
-- `model`: the model from stderr (opus, sonnet, or haiku)
+- `model`: the model from stderr (opus, sonnet, or fable)
 - `run_in_background`: **true** (always — tasks run in background by default)
 - `description`: a short summary of the task
 
@@ -218,8 +230,7 @@ resets the test task to pending. The loop continues as long as N improves.
 ## Agent Types
 
 The default agent types are `opus`, `sonnet`, and `fable`. Any string can be
-used as an agent type — unknown types default to the opus model with no
-timeout or turn limit.
+used as an agent type. Unknown types use the opus model.
 
 | Type | Model | Use For |
 |------|-------|---------|
@@ -240,9 +251,9 @@ parameter of the Claude Code Agent tool (`opus`, `sonnet`, `haiku`, `fable`).
 | `running` | Agent is currently executing |
 | `completed` | Finished successfully |
 | `failed` | Agent finished but task failed |
-| `timeout` | Agent was killed after exceeding time limit |
-| `max_turns` | Agent hit the maximum number of turns |
-| `usage_limit` | Agent hit its API usage/rate limit |
+| `timeout` | Legacy status from older runs. Current code never sets it |
+| `max_turns` | Legacy status from older runs. Current code never sets it |
+| `usage_limit` | Legacy status from older runs. Current code never sets it |
 | `interrupted` | User killed the task with Ctrl+C or `--kill` |
 
 Tasks with status `failed`, `interrupted`, `timeout`, `max_turns`, `usage_limit`,
@@ -292,15 +303,10 @@ closing ritual").
 
 ### Long-Running Commands
 
-For commands that take a while (builds, test suites), pipe output through tee
-so it can be monitored in real-time via `--tail`:
-
-```bash
-make -j4 2>&1 | tee -a $TASK_LIVE_LOG
-./run-tests.sh 2>&1 | tee -a $TASK_LIVE_LOG
-```
-
-Use `-a` (append) so multiple commands don't overwrite each other.
+`--tail` shows the subagent's .jsonl log, which only updates when a tool call
+returns. A long Bash command's output appears in `--tail` after the command
+finishes. The task prompt already tells agents to run Bash commands in the
+foreground.
 
 ### Prompt Tips
 
@@ -376,7 +382,7 @@ The task runner compares `result_value` between consecutive runs:
 ### What `pending_context` Does
 
 When `on_partial_failure` activates a fix task, it injects context about the
-failure into the fix task's `pending_context` field. This context is prepended
+failure into the fix task's `pending_context` field. This context is appended
 to the fix task's prompt at run time and then cleared. It includes:
 
 - Which test task failed and what the result was
@@ -394,14 +400,18 @@ Tasks can depend on other tasks:
 task_runner.py --create run-tests --depends build-it
 ```
 
-- A task won't run until all its dependencies have status `completed`
+- A task is not listed as ready (by `--pending` or after `--complete`) until
+  all its dependencies have status `completed`. `--prepare` does not check
+  dependencies, so check `--pending` first.
 - Use `--pending` to see which tasks are ready for `--prepare`
 - The `run_on_dep_failure` DB field (set via SQL, not `--create`) allows a
   task to run even if dependencies failed
 
 ### Resource Groups
 
-Tasks in the same `resource_group` won't run concurrently. Use this for
+Tasks in the same `resource_group` are not listed as ready while another task
+in that group is running. `--prepare` does not enforce this, so check
+`--pending` first. Use this for
 tasks that need exclusive access to a build directory:
 
 ```sql
@@ -411,8 +421,8 @@ UPDATE tasks SET resource_group = 'singular-build' WHERE name IN ('build-lset', 
 ## Failure Handling
 
 Failed tasks stay in their failed state. Use `--reset` + `--prepare` to retry,
-or `--continue` for tasks that were `failed`, `interrupted`, `timeout`, or
-`max_turns`.
+or `--continue` for tasks that are `failed`, `interrupted`, `timeout`,
+`max_turns`, `usage_limit`, `completed`, or already `pending`.
 
 The one automatic behavior is `on_partial_failure` chains (see Iterative
 Task Chains above): when a task reports `TASK_RESULT: FAILURE` with a
@@ -421,10 +431,12 @@ if progress is being made.
 
 ## Auto-Commit
 
-After a successful task, the task runner commits changes across all git repos
-under `~/`. Excluded from auto-commit:
+After a successful task, the task runner commits changes in every git repo
+that is a direct child of `~/` (plus their worktrees under `~/`, and `~`
+itself if it is a repo). Repos nested deeper, such as `~/itodb/etl`, are not
+auto-committed. Excluded from auto-commit:
 
-- `task_runner.py`, `init_db.py`, `tasks.db`, `agent-settings.json` (infrastructure)
+- `task_runner.py`, `init_db.py`, `tasks.db`, `agent-settings.json` at a repo root (infrastructure)
 - `build/` and `build-*` directories (build artifacts)
 
 The committed files and commit SHAs are recorded in the run for traceability.
@@ -543,6 +555,7 @@ The database is `tasks.db` (SQLite). Key tables:
 - **deliverables**: Files produced by successful tasks
 - **sessions**: Cache of `~/.claude` session files for `format_session.py`
   (mtime-based, tracks titles, display names, message counts)
+- **inbox**: Queued messages from `--send`, `--send-agent`, and `--send-session`, with delivery time
 
 Each run records the exact prompt that was sent (`agent_prompt` column), so you
 can see what every run actually received even if the task's prompt has been
@@ -553,8 +566,9 @@ modified since.
 - **Agent tool execution**: Tasks run as Claude Code Agent tool invocations
   from within an interactive session. The orchestrating session handles the
   Agent tool call; the task runner handles everything else.
-- **Auto-commit**: On success, `--complete` commits changes across all git
-  repos under `~/`, excluding infrastructure files and build artifacts.
+- **Auto-commit**: On success, `--complete` commits changes in git repos that
+  are direct children of `~/` (see Auto-Commit), excluding infrastructure files
+  and build artifacts.
 - **Run data storage**: Each run's output is stored redundantly across
   multiple locations for different purposes:
 
@@ -729,10 +743,11 @@ Notes:
   If you already have a specific `PreToolUse` entry (e.g., the
   EnterPlanMode redirect below), add this as a separate entry — don't
   overwrite the existing one.
-- `--drain-inbox` is a no-op when the hook JSON has no `agent_id` (i.e.,
-  when the hook fires in the top-level interactive session rather than a
-  subagent). This means the hook is safe to leave installed globally; it
-  only delivers messages to subagents that have been targeted.
+- In a subagent, `--drain-inbox` delivers rows keyed to that `agent_id`. In a
+  top-level session, it delivers rows sent with `--send-session` to that
+  session, plus task rows when the session is a `--chat` continuation. With
+  no matching rows it does nothing, so the hook is safe to leave installed
+  globally.
 - Messages appear in the agent's context as:
   ```
   <task-inbox>

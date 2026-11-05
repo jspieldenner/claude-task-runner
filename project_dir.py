@@ -2,8 +2,8 @@
 
 Search order:
 1. TASK_RUNNER_PROJECT env variable
-2. Current working directory (if it has tasks.db)
-3. ~/*/tasks.db (first match, error if ambiguous)
+2. Current working directory (if it has a non-empty tasks.db)
+3. ~/*/tasks.db (only if exactly one non-empty match, warns if several)
 4. Current working directory (fallback for init)
 """
 
@@ -41,11 +41,10 @@ def cwd_to_bucket(cwd):
     """Encode an absolute cwd as the Claude Code project-bucket dirname.
 
     Claude Code creates one subdirectory under ~/.claude/projects/ per
-    cwd a session was started from. The dirname is the absolute cwd
-    with each "/" replaced by "-" — so cwd "/home/alice" maps to bucket
-    "-home-alice". The encoding is lossy (a real "-" in the cwd is
-    indistinguishable from a "/" separator on decode), so this is one-way
-    only; recover the original cwd from a session's events instead."""
+    cwd a session was started from. Claude Code replaces "/" and other
+    characters such as "." with "-". This function only replaces "/", so
+    it gives the wrong bucket for a cwd that contains a ".". The encoding
+    is lossy and one-way. Recover the original cwd from a session's events."""
     return cwd.replace("/", "-")
 
 

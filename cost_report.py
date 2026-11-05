@@ -18,7 +18,10 @@ Usage:
     python3 cost_report.py --by-date          # Daily cost breakdown
     python3 cost_report.py --interactive      # Interactive session costs
     python3 cost_report.py --validate         # Cross-validate pricing model
-    python3 cost_report.py --all              # All reports
+    python3 cost_report.py --detail           # Per-run detail with token counts
+    python3 cost_report.py --all              # Every report except --detail
+    python3 cost_report.py --task NAME        # Limit --by-task and --detail to one task
+    python3 cost_report.py --since 2026-01-01 --until 2026-01-31   # UTC date range
     python3 cost_report.py --json             # JSON output
     python3 cost_report.py --reindex          # Force full re-index of all files
 """
@@ -121,7 +124,7 @@ def get_session_id_for_file(file_path):
                         sid = event.get("session_id")
                         if sid:
                             return sid
-                    # Only check first few lines
+                    # Stop at the first assistant event. The init event comes before it.
                     if event.get("type") == "assistant":
                         break
         except OSError:
@@ -146,7 +149,7 @@ def scan_session_files():
     Scans three locations:
     1. Top-level session files: <home-bucket>/*.jsonl
     2. Subagent files: <home-bucket>/*/subagents/agent-*.jsonl
-    3. Old task runner logs: ~/project/logs/*.log (stream-json from claude --print)
+    3. Old task runner logs: <project dir>/logs/*.log (stream-json from claude --print)
 
     Returns list of file paths.
     """
@@ -322,7 +325,7 @@ def parse_log(path):
     Returns a dict with:
         result: dict or None -- from the last result event
             total_cost_usd, num_turns, duration_ms, session_id,
-            model_usage: {model: {inputTokens, outputTokens, cacheRead, cacheWrite, costUSD}}
+            model_usage: {model: {inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, costUSD}}
         assistant_tokens: {model: {input, output, cache_read, cache_write, count}}
             -- deduped by message ID, summed per model
         first_ts, last_ts: ISO timestamps from assistant events
@@ -617,7 +620,7 @@ def collect_interactive_sessions(db=None):
 
     Returns list of dicts with:
         session_id, display_name, custom_title, first_ts, last_ts,
-        assistant_tokens, result (always None for interactive)
+        assistant_tokens, result (from a result event in the session file, usually None)
     """
     if not os.path.exists(DB_PATH):
         return []
@@ -807,7 +810,7 @@ def filter_sessions_by_date(sessions, db, since=None, until=None, is_task=True):
     for s in sessions:
         # Determine the file path(s) to look up in cost_daily.
         # For task sessions, try both: the session file in ~/.claude/projects/
-        # (new Agent-tool runs) AND the log file in ~/project/logs/ (old
+        # (new Agent-tool runs) AND the log file in <project dir>/logs/ (old
         # claude --print runs). One or both may have entries in cost_daily.
         # For interactive sessions, use the session file path.
         date_tokens = {}
@@ -817,11 +820,11 @@ def filter_sessions_by_date(sessions, db, since=None, until=None, is_task=True):
             if sid:
                 session_path = os.path.join(SESSIONS_DIR, f"{sid}.jsonl")
                 date_tokens = query_daily_by_file(db, session_path, since, until)
-            # Also try log file (old runs indexed from ~/project/logs/)
+            # Also try log file (old runs indexed from <project dir>/logs/)
             log_path = s.get("log_path")
             if log_path and not date_tokens:
                 date_tokens = query_daily_by_file(db, log_path, since, until)
-            # If neither found, try the other way (merge if both have data)
+            # Only one source is used. The log file is checked only when the session file has no rows in range.
             if sid and log_path and not date_tokens:
                 pass  # Already tried both
             file_path = os.path.join(SESSIONS_DIR, f"{sid}.jsonl") if sid else log_path
@@ -1539,7 +1542,7 @@ def main():
     parser.add_argument("--interactive", action="store_true", help="Interactive session costs")
     parser.add_argument("--validate", action="store_true", help="Cross-validate pricing model")
     parser.add_argument("--detail", action="store_true", help="Per-run detail with token counts")
-    parser.add_argument("--all", action="store_true", help="All reports")
+    parser.add_argument("--all", action="store_true", help="All reports except --detail")
     parser.add_argument("--task", type=str, help="Filter to a specific task name")
     parser.add_argument("--since", type=str,
                         help="Filter to events since DATE (YYYY-MM-DD, UTC)")

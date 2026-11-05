@@ -1,30 +1,37 @@
 #!/usr/bin/env python3
 """Report which tasks have written compactions and lightrag KG entries.
 
-For each task, looks up the parent session(s) that ran it (via the
-subagent-dir layout) and checks whether the corresponding compaction
-and KG-entry artifacts exist. A task is "covered" if AT LEAST ONE of
-its runs landed in a parent session that produced the artifact.
+For each task, looks up the parent session(s) that ran it (via
+runs.session_id or the subagent-dir layout) and checks whether the
+corresponding compaction and KG-entry artifacts exist. A task is "ok"
+only when one of its own runs can be shown to have written the artifact.
+A task is "shared" when only its parent session has the artifact.
 
-Sources:
-  ~/project/tasks.db                                — tasks + runs
-  ~/project/sessions/subagents/<parent>/agent-<id>  — agent_id → parent
-  ~/project/compactions/session-<UUID>.md           — compactions
+Sources (<project> is the directory holding tasks.db):
+  <project>/tasks.db                                     — tasks + runs
+  <project>/sessions/subagents/<parent>/agent-<id>.jsonl — agent_id → parent
+  <project>/compactions/session-<UUID>[-<AID>].md,
+      session-agent-<AID>.md, DDMonYYYY-HHMM.md          — compactions
   ~/lightrag-history/{incoming,processed,failed}/
-      session-<UUID>.json                           — KG entries
+      session-<UUID>[-<AID>].json, session-agent-<AID>.json — KG entries
+  <project>/sessions/*.jsonl, ~/.claude/projects/*/*.jsonl — fork lookup
 
 Coverage states per artifact (compaction, KG):
-  ok          — at least one of the task's parent sessions has it
-  missing     — none do, but at least one parent session is identified
-  unmappable  — no run has agent_id, or no agent_id maps to a subagent dir
+  ok          — one of the task's own runs wrote it (chat_session_id or
+                agent_id in the filename, or the --show -v probe)
+  shared      — a parent session has it, but no run can be tied to it
+  missing     — a parent session is known and none has it
+  unmappable  — no runs, or no parent found (no runs.session_id and no
+                agent_id in subagents/) and no direct match
 
 Usage:
   coverage_report.py                       # full table + summary
   coverage_report.py --uncovered           # only rows missing compaction OR KG
   coverage_report.py --no-compaction       # only rows missing the compaction
   coverage_report.py --no-kg               # only rows missing the KG entry
-  coverage_report.py --task-status ok      # only tasks with status=ok
+  coverage_report.py --task-status completed   # only tasks with status=completed
   coverage_report.py --json                # machine-readable output
+  coverage_report.py --no-probe-shared     # skip the --show -v probe that upgrades shared to ok
 """
 
 import argparse
@@ -331,16 +338,14 @@ def coverage_for_task(
 ) -> dict:
     """Compute coverage for one task's runs.
 
-    Two coverage tiers per artifact:
-      direct  — definitively this task's run wrote the artifact. Two
-                signals qualify: a run's chat_session_id matches an
-                artifact filename (--chat-resume fork), or a run's
-                agent_id matches an agent_id encoded in a composite
-                or agent-only artifact filename (/end from inside a
-                subagent).
-      shared  — a parent session has the artifact (could have been
-                written by the orchestrator or any sibling subagent;
-                no per-task attribution)
+    Returns one of four states per artifact:
+      ok          — direct: a run's chat_session_id matches a plain
+                    artifact filename, or a run's agent_id matches one
+                    encoded in a composite or agent-only filename
+      shared      — a parent session has the artifact, with no per-task
+                    attribution
+      missing     — a parent is known and none has the artifact
+      unmappable  — no runs, or no parent found and no direct match
 
     Parent UUID resolution: older runs have runs.session_id set to the
     parent UUID directly; newer runs have runs.agent_id looked up via

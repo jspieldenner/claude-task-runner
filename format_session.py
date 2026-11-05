@@ -671,7 +671,8 @@ def get_session_info(path):
                 elif etype == "user":
                     msg = event.get("message", {})
                     content = msg.get("content", "")
-                    # Count user text messages (not tool results)
+                    # Count user messages whose content is a string or holds bare
+                    # string items. Text-block dicts and tool results are not counted.
                     if isinstance(content, str) and content.strip():
                         user_msg_count += 1
                         if first_user_msg is None:
@@ -689,7 +690,8 @@ def get_session_info(path):
                                     first_user_msg = item.strip()
                                     break
                 elif etype == "assistant":
-                    # Count unique assistant messages (deduplicate by msg id)
+                    # Counts assistant events (streamed messages are counted once per
+                    # event). The count is not returned.
                     assistant_msg_count += 1
     except OSError:
         pass
@@ -710,8 +712,9 @@ def scan_sessions(db):
     """Scan session files and update the sessions cache table.
 
     Walks every bucket under PROJECTS_ROOT (Claude Code shards sessions
-    by cwd), so sessions started outside ~/ also appear. Only re-parses
-    files whose mtime has changed AND whose recorded bucket matches.
+    by cwd), so sessions started outside ~/ also appear. Skips a file
+    only when its mtime is unchanged and its recorded bucket matches,
+    and re-parses it otherwise.
     Preserves display_name on re-scan. Marks sessions whose files no
     longer exist (in any bucket) as deleted. Silently skips cache
     updates if the database is read-only.
@@ -1259,7 +1262,7 @@ def main():
     )
     parser.add_argument(
         "--tool-output-lines", type=int, default=20, metavar="N",
-        help="Max lines per tool result (default: 20, 0=unlimited)"
+        help="Not yet used. Tool results are always cut to 20 lines."
     )
     parser.add_argument(
         "--compaction", action="store_true",
@@ -1273,8 +1276,8 @@ def main():
     parser.add_argument(
         "--all", action="store_true",
         help="With a session: show everything (tools, tool output, thinking, "
-             "system, compaction). Without one: render every --list session "
-             "to stdout, newest first, one after another."
+             "system, compaction, skill text). Without one: render every "
+             "--list session to stdout, newest first, one after another."
     )
     parser.add_argument(
         "-t", "--timestamps", action="store_true",

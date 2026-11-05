@@ -285,7 +285,7 @@ def search(conn, query, top_k, alpha):
 
 
 def fmt_age(mtime, now=None):
-    """Human-readable age, fixed 4-char width: '3d', '12d', '5w', '14w', '8mo', '1y'."""
+    """Human-readable age, number padded to 3 chars plus unit: '  5h', '  3d', '  5w', '  8mo', '  1y'."""
     if now is None:
         now = time.time()
     sec = max(0, now - mtime)

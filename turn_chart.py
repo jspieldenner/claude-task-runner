@@ -99,7 +99,7 @@ def print_chart(runs, term_width, show_time=False):
 
     print()
     print(f"  {len(runs)} runs, max {max_turns} turns")
-    print(f"  █ success  ░ failure  ▒ other  x=fail T=timeout M=max_turns U=usage_limit ?=unknown")
+    print(f"  █ success  ░ failure  ▒ other  x=fail T=timeout M=max_turns U=usage_limit I=interrupted ?=unknown")
 
 
 def print_histogram(runs, term_width, bucket_size=10):
